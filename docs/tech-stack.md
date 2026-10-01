@@ -6,7 +6,7 @@
 
 | 项 | 选择 | 理由 |
 | --- | --- | --- |
-| 宿主 | DSH `0.2.0-rc.2`（本机安装于 `/nix/store/phlcm79hb1aym7w3xdspj5qrgz8g4qjg-dsh-0.2.0-rc.2/`） | 功能以 DSH 插件形态交付，只能用宿主提供的扩展点 |
+| 宿主 | DSH `0.2.0-rc.2` | 功能以 DSH 插件形态交付，只能用宿主提供的扩展点 |
 | 语言 | 普通 ESM JavaScript，无构建步骤 | 与官方插件模板一致；Client 半边由 DSH 的 client module loader 直接加载，引入编译步骤只会增加故障面 |
 | 包形态 | 一个可安装 bundle，源码放仓库根目录（规则 D6） | 见 [architecture.md](architecture.md) 的目录结构 |
 | 依赖 | **零**：`package.json` 没有 `dependencies`；不声明对 DSH 内置包（`@deepseek-ai/dsh-*`）的依赖 | 这些包从 DSH 安装处解析；bundle 只声明自己的元数据与入口 |
