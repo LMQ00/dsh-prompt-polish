@@ -86,12 +86,28 @@ window.__ModuleLoader__.load({
 `;
 
 		/**
-		 * Render the stylesheet once per document.
-		 * @returns the style element, or null when it is already present.
+		 * Inject the stylesheet once per document, imperatively.
+		 *
+		 * It must NOT be a React element: a render-phase `document.querySelector`
+		 * guard makes the tag appear on one render and disappear on the next, so
+		 * every keystroke in the composer (which re-renders the trigger button)
+		 * toggles the whole stylesheet — the visible symptom is a flickering
+		 * button and a hover state that appears to stick.
+		 *
+		 * @param ctx - Client plugin context, for disposal.
 		 */
-		function Styles() {
-			if (typeof document === 'undefined' || document.querySelector('style[data-polish-css]') !== null) return null;
-			return h('style', { 'data-polish-css': '', dangerouslySetInnerHTML: { __html: CSS } });
+		function installStyles(ctx) {
+			ctx.effect(() => {
+				if (typeof document === 'undefined') return () => {};
+				if (document.querySelector('style[data-polish-css]') !== null) return () => {};
+				const tag = document.createElement('style');
+				tag.setAttribute('data-polish-css', '');
+				tag.textContent = CSS;
+				document.head.append(tag);
+				return () => {
+					tag.remove();
+				};
+			}, 'polish: stylesheet');
 		}
 
 		/**
@@ -360,6 +376,8 @@ window.__ModuleLoader__.load({
 		 * @param ctx - Client plugin context.
 		 */
 		function apply(ctx) {
+			installStyles(ctx);
+
 			/** Trigger button: reads the draft, opens the overlay. */
 			function PolishButton({ sessionId, useInput }) {
 				const draft = useInput((state) => state.draft);
@@ -383,7 +401,6 @@ window.__ModuleLoader__.load({
 						disabled: busy,
 						onClick: () => start(ctx, sessionId, stripCommand(draft)),
 					},
-					h(Styles),
 					h(TriggerIcon),
 				);
 			}
@@ -585,7 +602,6 @@ window.__ModuleLoader__.load({
 				return h(
 					'div',
 					{ className: 'polish-panel', 'data-polish-overlay': '', onMouseDown: (event) => event.stopPropagation() },
-					h(Styles),
 					h(
 						'div',
 						{ className: 'polish-head' },
