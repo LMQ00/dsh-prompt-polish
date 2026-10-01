@@ -1,6 +1,6 @@
 # 架构
 
-> 状态：设计已定，代码待实现。所有「已核实」条目来自读 DSH `0.2.0-rc.2` 的契约与打包产物，不是推测。
+> 状态：**已实现**。所有「已核实」条目来自读 DSH `0.2.0-rc.2` 的契约与打包产物，不是推测。
 
 ## 一句话
 
@@ -44,10 +44,11 @@
   - 打 `/polish` → 监听 `command/executed(sessionId, name, result)`；粗糙文本来自按钮组件在草稿变化时记下的、含 `/polish` 的最近一行（命令提交会把草稿清空，所以只能在清空前记）。命令 token 可能在行首也可能在行尾，用 `stripCommand` 去掉它，其余原样保留。
 - 「采用」时调 `inputActions.setDraft(text)`，然后关闭浮层。**代码里不出现 `submit`**。
 - 样式只用 DSH 主题 token，保证深色/浅色主题都成立。
+- 工厂返回值多一个 `__internals`（纯状态机 + 序列化函数）作为测试缝；运行时不读它。为什么需要、测试怎么用，见 [testing.md](testing.md) §测试缝。
 
 ## 调用桥
 
-**已定：Connection 的通用 RPC 通道。**
+**已定：插件自有的 HTTP 路由。**
 
 - Host：`ctx.webServer.register({ kind: 'exact', path: '/polish/translate', handler })`。
 - Client：`fetch('polish/translate', { method: 'POST', body: JSON.stringify(payload) })`（相对路径，解析方式与 shipped 的 `/api` 通道一致）。

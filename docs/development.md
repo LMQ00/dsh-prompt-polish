@@ -1,6 +1,6 @@
 # 开发
 
-> 状态：环境与流程已定，代码待实现。
+> 状态：**已实现**。
 
 ## 环境
 
@@ -25,7 +25,7 @@ plugin_manager action=install_bundle target=/home/LMQ/github/提示词
 - 改动影响当前 profile 的所有会话，并跨重启保留。
 - 判断是否真的生效，看安装结果里的 `application` 与 `warnings` 字段；日志、进程列表、页面 boot payload 都不算数。
 - 安装后用 `cordis_inspect_query` 确认新行存在（不需要审批）。
-- 纯 Client 半边（`client.js`）改动，若 `pnpm run dev:web` 在同一 checkout 运行，会随 HMR 自动重载；否则需要刷新页面。Host 半边改动需要重新加载插件。
+- 纯 Client 半边（`client.js`）改动**硬刷新页面**即可生效。`[待确认]` 「若 `pnpm run dev:web` 在同一 checkout 运行会随 HMR 自动重载」这一条本项目从未验证过（开发期间一直是硬刷新），不要当既成事实。Host 半边改动**必须重启 dsh**，见 [runbook.md](runbook.md) §Host 改动必须重启。
 
 ## 验证（规则 D3）
 
@@ -46,21 +46,6 @@ npm test          # = node --test，自动发现 test/*.test.js
 
 零依赖，用的是 Node 内置 `node:test`。改任何行为前后都跑一遍；行为改动必须补测试（规则 D4）。覆盖范围与已知缺口见 [testing.md](testing.md)。
 
-## 调试
+## 排障
 
-- 浏览器控制台看 Client 半边报错。
-- Host 半边报错看 `dsh web` 的进程输出。
-- 临时脚本、日志、抓包一律放 `tmp/`（规则 D1）。
-
-## 常见坑
-
-| 现象 | 原因 |
-| --- | --- |
-| 按钮不出现 | `conversation.input.right` 只在有 session 时渲染 |
-| 浮层位置不对 | 挂错了 slot：`conversation.composer.dock` 在输入框**下方**，`conversation.input.dock` 才在上方 |
-| 「采用」后消息被发出 | 误调了 `inputActions.submit()` —— 只允许 `setDraft()` |
-| 样式在深色下不可读 | 用了硬编码颜色而不是主题 token |
-| 改动看不到 | Client 半边没 HMR，页面没刷新 |
-| 按钮闪烁 / 悬停态看起来粘住 | 样式表被当成 React 元素渲染：render 阶段的 `document.querySelector` 守卫会在「有→无→有」之间翻转，输入框每敲一个字都重渲染按钮，整套样式就被反复摘掉挂回。**命令式注入一次**（`apply` 里 `document.createElement('style')` + `ctx.effect` 回收），不要用 React 元素 |
-| 输入框里打字打不进去 | 用 effect 重置表单草稿会和击键竞争；改成 render 阶段比较签名再重置（React 官方的「prop 变了就调整 state」写法） |
-| 浮层在**空白新会话**里被压扁（旧会话正常） | 新会话的 composer 是 hero 变体：`composerStack` 是列向 flex 且高度受限，`conversation.input.dock` 的默认 `flex-shrink:1` 会把面板压到只剩标题。给面板加 `flex:0 0 auto` |
+调试入口、常见坑、Host 改动的重启要求与重启前的探针，全部在 [runbook.md](runbook.md)。

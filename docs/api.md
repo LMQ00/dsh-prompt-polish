@@ -1,6 +1,6 @@
 # 契约
 
-> 状态：设计已定，代码待实现。命令字段名依据 `@deepseek-ai/dsh-commands` 的 `CommandDefinition`（已核实）。
+> 状态：**已实现**。命令字段名依据 `@deepseek-ai/dsh-commands` 的 `CommandDefinition`（已核实）。
 
 ## 命令 `/polish`
 
@@ -73,11 +73,21 @@
 
 - 语言跟输入语言，术语保留英文。
 - JSON 解析失败 → 按 `polish/bad-output` 处理（见下），不把裸文本塞进输入框。
+- 多选标记：提示词要求模型写 `"multi": true|false`；**Client 同时接受 `multiSelect`**（shipped 提问 UI 的拼写），两者都缺失时按单选处理。
 
 ## HTTP 契约
 
 - 路由：`POST /polish/translate`（`kind: 'exact'`，插件自己注册在 `webServer` 上）。
-- 认证：先过 `ctx.connection.requestRejection({ headers })`，不过则 401 / 403（响应体 `unauthorized` / `forbidden`）。**已实测**：无 cookie 的 POST 得到 401 `unauthorized`，未注册路径得到 404。
+- 认证：先过 `ctx.connection.requestRejection({ headers })`，不过则 401 / 403（响应体 `unauthorized` / `forbidden`）。**已实测**（2026-10-01，profile `web`）：
+
+  | 请求 | 结果 |
+  | --- | --- |
+  | `POST /polish/translate`（无 cookie） | `401 unauthorized` |
+  | `GET /polish/translate`（无 cookie） | `401`——**认证在方法检查之前**，方法不对也先得 401 |
+  | `GET /polish/nope` | `404`（未注册路径落到 SPA fallback） |
+  | `POST /polish/nope` | `405`（fallback 对 POST 的方法处理，**不是 404**） |
+
+  所以「路由是否真的挂上」要看 `/polish/translate` 得 401、`/polish/nope` 得 404/405，两者不是同一个数。
 - 请求体上限 64 KiB（`MAX_BODY_BYTES`）→ 超限 413；非 POST → 405；非 JSON → 400。
 - 请求：`{ sessionId?: string, text: string, transcript: [{ questions, answers }], rounds?: number, feedback: string }`。
 - `rounds` 是**本次尝试已花掉的追问轮次**，由 Client 报上来（Host 用它决定是否写「问满轮次，别再问」）。缺省时回退到 `transcript.length`。

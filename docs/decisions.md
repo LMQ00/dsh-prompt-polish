@@ -83,5 +83,5 @@
 ## 已知未决/风险
 
 - `/polish` 会在对话流留下一条命令记录行（DSH 命令机制固有，log-only、模型不可见）。已压到无 `args`、无结果 `text`。若实测仍不可接受，退路是只保留按钮入口。详见 [api.md](api.md)。
-- 改 Host 半边（`index.js`）后，**必须重启 dsh 才能生效**：Host 模块被 ESM 缓存，`set_plugin` 关开一次也只会复用旧模块。Client 半边（`client.js`）不受此限。
-- Config 延后：待确认 workspace 包能否 bare import `@deepseek-ai/schemastery`。
+- 改 Host 半边（`index.js`）后**必须重启 dsh**（ESM 模块缓存）。操作步骤与重启前探针见 [runbook.md](runbook.md) §Host 改动必须重启。
+- Config 延后。`[待确认]`：workspace 包能否 bare import `@deepseek-ai/schemastery` 以声明 Config schema。本项目至今**没有任何 bare import**，所以这条假设始终未被验证过——补 Config 时先验证它。

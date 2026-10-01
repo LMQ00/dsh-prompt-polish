@@ -6,15 +6,17 @@
 
 改代码前先读对应文档；文档与代码冲突时以代码为准，并立刻修文档（见 D2）。
 
-| 文档 | 何时读 |
-| --- | --- |
-| [docs/tech-stack.md](docs/tech-stack.md) | 改技术选型、加依赖、考虑换实现方式前 |
-| [docs/architecture.md](docs/architecture.md) | 改模块划分、Host/Client 职责、调用桥、写入路径前 |
-| [docs/data-model.md](docs/data-model.md) | 改浮层状态机、追问轮次、错误态前 |
-| [docs/api.md](docs/api.md) | 改 `/polish` 命令契约、Config 配置项、输出契约前 |
-| [docs/development.md](docs/development.md) | 搭环境、安装 bundle、构建、调试前 |
-| [docs/testing.md](docs/testing.md) | 写测试、跑盲读测试前 |
-| [docs/decisions.md](docs/decisions.md) | 追问「为什么这么设计」「为什么不用 X」前 |
+| 文档 | 类型 | 何时读 |
+| --- | --- | --- |
+| [docs/交接文档.md](docs/交接文档.md) | 入口 | 第一次接手，或不确定该读哪份时 |
+| [docs/tech-stack.md](docs/tech-stack.md) | 技术选型 | 改技术选型、加依赖、考虑换实现方式前 |
+| [docs/architecture.md](docs/architecture.md) | 架构 | 改模块划分、Host/Client 职责、调用桥、写入路径前 |
+| [docs/data-model.md](docs/data-model.md) | 数据模型 | 改浮层状态机、追问轮次、错误态前 |
+| [docs/api.md](docs/api.md) | 契约 | 改 `/polish` 命令契约、HTTP 契约、输出契约、错误码前 |
+| [docs/development.md](docs/development.md) | 开发 | 搭环境、安装 bundle、判断是否真的生效前 |
+| [docs/testing.md](docs/testing.md) | 测试 | 写测试、跑测试、跑盲读测试前 |
+| [docs/runbook.md](docs/runbook.md) | 排障 | 出问题时：按钮不见、浮层错位、打字打不进、改了不生效 |
+| [docs/decisions.md](docs/decisions.md) | 决策 | 追问「为什么这么设计」「为什么不用 X」前 |
 
 ## 规则
 
