@@ -28,7 +28,7 @@
  * and reuses `connection.requestRejection` for browser trust and
  * authentication.
  *
- * @module @local/dsh-polish
+ * @module dsh-prompt-polish
  */
 
 export const name = 'polish';

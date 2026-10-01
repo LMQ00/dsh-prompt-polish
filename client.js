@@ -20,11 +20,11 @@
  * inline free-text row carrying the same affordance. That is the shape the user
  * already reads as "the assistant is asking me something".
  *
- * @module @local/dsh-polish/client
+ * @module dsh-prompt-polish/client
  */
 
 window.__ModuleLoader__.load({
-	id: '@local/dsh-polish',
+	id: 'dsh-prompt-polish',
 	factory(require) {
 		const React = require('react');
 		const h = React.createElement;

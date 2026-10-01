@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-polish",
+  "name": "dsh-prompt-polish",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -15,7 +15,8 @@
   "files": [
     "index.js",
     "client.js",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "README.md"
   ],
   "dsh": {
     "bundle": {

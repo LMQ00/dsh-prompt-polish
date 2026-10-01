@@ -33,7 +33,7 @@ globalThis.window = {
 await import('../client.js');
 
 assert.ok(registration, 'client.js must register itself with the module loader');
-assert.equal(registration.id, '@local/dsh-polish');
+assert.equal(registration.id, 'dsh-prompt-polish');
 
 /** Minimal React double: the factory only needs `createElement` at module scope. */
 const React = {

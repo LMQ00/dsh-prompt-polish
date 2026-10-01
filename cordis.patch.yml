@@ -1,4 +1,4 @@
-# Bundle patch for @local/dsh-polish.
+# Bundle patch for dsh-prompt-polish.
 #
 # One Host row. It declares no Config: the model override, the clarification
 # round cap, and the call timeout are code-owned constants in index.js.
@@ -6,4 +6,4 @@
 # required injected Service.
 - insert:
     - id: polish
-      name: '@local/dsh-polish'
+      name: 'dsh-prompt-polish'
