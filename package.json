@@ -1,9 +1,19 @@
 {
   "name": "dsh-prompt-polish",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "把粗糙提示词转写成规范提示词，确认后写入输入框。",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LMQ00/dsh-prompt-polish.git"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis"
+  ],
   "scripts": {
     "test": "node --test"
   },
@@ -16,7 +26,8 @@
     "index.js",
     "client.js",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {

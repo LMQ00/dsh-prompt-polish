@@ -59,3 +59,7 @@ DSH 插件：把粗糙提示词转写成规范提示词，浮层预览确认后�
 ```
 npm test      # = node --test，自动发现 test/*.test.js，零依赖
 ```
+
+## 协议
+
+[MIT](LICENSE)
