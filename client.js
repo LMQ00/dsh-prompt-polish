@@ -14,6 +14,12 @@
  * part of the user's text or the finished prompt is appended to the session
  * log.
  *
+ * The clarification choices deliberately mirror the shipped question composer
+ * (`@deepseek-ai/dsh-client-ui-user-questions`): full-width option rows with a
+ * number badge for a single choice and a checkbox for a multi choice, plus an
+ * inline free-text row carrying the same affordance. That is the shape the user
+ * already reads as "the assistant is asking me something".
+ *
  * @module @local/dsh-polish/client
  */
 
@@ -35,6 +41,58 @@ window.__ModuleLoader__.load({
 
 		/** The closed overlay state. */
 		const IDLE = { phase: 'idle' };
+
+		/** One untouched clarification answer. */
+		const EMPTY_ANSWER = { options: [], custom: '' };
+
+		/**
+		 * Component-local stylesheet. Rendered as a React element so unmounting
+		 * removes it, and guarded by a data attribute so two mounts never stack
+		 * duplicate rules.
+		 */
+		const CSS = `
+.polish-panel{display:flex;flex-direction:column;gap:10px;margin:0 0 8px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-xl,12px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px;box-shadow:var(--dsw-elevation-panel,none)}
+.polish-panel *{box-sizing:border-box}
+.polish-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.polish-x{width:22px;height:22px;padding:0;border:0;border-radius:999px;background:0 0;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));cursor:pointer;display:grid;place-items:center}
+.polish-x:hover{background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2));color:var(--dsw-alias-label-primary)}
+.polish-q{margin:0;font-size:14px;font-weight:500;line-height:22px}
+.polish-options{display:flex;flex-direction:column;gap:1px;margin:2px 0 0}
+.polish-option{display:flex;align-items:flex-start;gap:8px;width:100%;min-height:40px;padding:8px 12px 8px 8px;border:1px solid transparent;border-radius:var(--dsw-radius-md,8px);background:0 0;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:background-color .12s,border-color .12s}
+.polish-option:hover{background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2))}
+.polish-option[data-selected="true"]{background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2));border-color:var(--dsw-alias-border-l2)}
+.polish-mark{flex:0 0 20px;width:20px;height:20px;margin-top:2px;display:grid;place-items:center;border-radius:var(--dsw-radius-xs,4px);background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px}
+.polish-mark[data-checkbox="true"]{background:0 0;border:.5px solid var(--dsw-alias-border-l1)}
+.polish-mark[data-checked="true"]{background:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-base)}
+.polish-label{flex:1;min-width:0;font-size:14px;line-height:24px}
+.polish-custom{display:flex;align-items:flex-start;gap:8px;width:100%;min-height:40px;padding:8px 12px 8px 8px;border:1px solid transparent;border-radius:var(--dsw-radius-md,8px);transition:background-color .12s,border-color .12s}
+.polish-custom[data-active="true"],.polish-custom:focus-within{background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2));border-color:var(--dsw-alias-border-l2)}
+.polish-input{flex:1;min-width:0;margin-top:2px;padding:0;border:0;outline:0;background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:24px;resize:none}
+.polish-input::placeholder{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
+.polish-block{width:100%;padding:8px 12px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg,8px);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;outline:0;resize:vertical}
+.polish-block:focus{border-color:var(--dsw-alias-brand-primary)}
+.polish-pre{margin:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg,8px);background:var(--dsw-alias-bg-layer-2);font-family:inherit;font-size:14px;line-height:22px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow-y:auto}
+.polish-hint{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.polish-error{color:var(--dsw-alias-state-error-primary);font-size:13px;line-height:20px}
+.polish-foot{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.polish-btn{padding:4px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg,8px);background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:20px;cursor:pointer}
+.polish-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2))}
+.polish-btn:disabled{opacity:.5;cursor:not-allowed}
+.polish-btn-primary{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-bg-base)}
+.polish-trigger{width:28px;height:28px;padding:0;display:grid;place-items:center;border:1px solid transparent;border-radius:var(--dsw-radius-lg,8px);background:0 0;color:var(--dsw-alias-label-secondary);cursor:pointer}
+.polish-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2));color:var(--dsw-alias-label-primary)}
+.polish-trigger[data-active="true"]{color:var(--dsw-alias-brand-primary)}
+.polish-trigger:disabled{opacity:.5;cursor:progress}
+`;
+
+		/**
+		 * Render the stylesheet once per document.
+		 * @returns the style element, or null when it is already present.
+		 */
+		function Styles() {
+			if (typeof document === 'undefined' || document.querySelector('style[data-polish-css]') !== null) return null;
+			return h('style', { 'data-polish-css': '', dangerouslySetInnerHTML: { __html: CSS } });
+		}
 
 		/**
 		 * One overlay state per Session. Kept outside React so the trigger button
@@ -106,6 +164,27 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * Whether one question accepts several options. The Host prompt asks for
+		 * `multi`; the shipped question schema calls the same idea `multiSelect`,
+		 * so both spellings are honored rather than trusting one.
+		 * @param question - the question payload.
+		 * @returns true when several options may be chosen.
+		 */
+		function isMulti(question) {
+			return question?.multiSelect === true || question?.multi === true;
+		}
+
+		/**
+		 * Flatten one answer slot into the single string the Host receives.
+		 * @param answer - the slot, or undefined when untouched.
+		 * @returns chosen options plus free text, joined.
+		 */
+		function serializeAnswer(answer) {
+			const slot = answer ?? EMPTY_ANSWER;
+			return [...slot.options, slot.custom.trim()].filter((part) => part !== '').join('、');
+		}
+
+		/**
 		 * Run one translation and settle the overlay into its next state.
 		 * @param ctx - Client plugin context.
 		 * @param sessionId - the Session.
@@ -141,7 +220,7 @@ window.__ModuleLoader__.load({
 				}
 				const value = result.value;
 				if (value?.kind === 'questions') {
-					writeState(sessionId, { ...state, phase: 'clarifying', questions: value.questions, round: state.transcript.length });
+					writeState(sessionId, { ...state, phase: 'clarifying', questions: value.questions });
 				} else if (value?.kind === 'prompt') {
 					writeState(sessionId, {
 						...state,
@@ -187,7 +266,7 @@ window.__ModuleLoader__.load({
 		 * Continue after one clarification round.
 		 * @param ctx - Client plugin context.
 		 * @param sessionId - the Session.
-		 * @param answers - one answer string per question, in question order.
+		 * @param answers - one serialized answer per question, in question order.
 		 */
 		function submitAnswers(ctx, sessionId, answers) {
 			const state = readState(sessionId);
@@ -248,125 +327,12 @@ window.__ModuleLoader__.load({
 			writeState(sessionId, IDLE);
 		}
 
-		/** Shared style fragments, all built from host theme tokens. */
-		const styles = {
-			button: {
-				display: 'inline-flex',
-				alignItems: 'center',
-				justifyContent: 'center',
-				width: '28px',
-				height: '28px',
-				padding: '0',
-				border: '1px solid transparent',
-				borderRadius: 'var(--dsw-radius-lg, 8px)',
-				background: 'transparent',
-				color: 'var(--dsw-alias-label-secondary)',
-				cursor: 'pointer',
-			},
-			buttonActive: {
-				color: 'var(--dsw-alias-brand-primary)',
-				borderColor: 'var(--dsw-alias-border-l2)',
-			},
-			buttonBusy: {
-				color: 'var(--dsw-alias-brand-primary)',
-				cursor: 'progress',
-			},
-			panel: {
-				display: 'flex',
-				flexDirection: 'column',
-				gap: '10px',
-				margin: '0 0 8px',
-				padding: '12px 14px',
-				border: '1px solid var(--dsw-alias-border-l1)',
-				borderRadius: 'var(--dsw-radius-xl, 12px)',
-				background: 'var(--dsw-alias-bg-layer-1)',
-				color: 'var(--dsw-alias-label-primary)',
-				fontSize: '13px',
-				lineHeight: '20px',
-			},
-			header: {
-				display: 'flex',
-				alignItems: 'center',
-				justifyContent: 'space-between',
-				gap: '8px',
-				color: 'var(--dsw-alias-label-secondary)',
-				fontSize: '12px',
-			},
-			pre: {
-				margin: '0',
-				padding: '10px 12px',
-				border: '1px solid var(--dsw-alias-border-l1)',
-				borderRadius: 'var(--dsw-radius-lg, 8px)',
-				background: 'var(--dsw-alias-bg-layer-2)',
-				fontFamily: 'inherit',
-				fontSize: '13px',
-				lineHeight: '20px',
-				whiteSpace: 'pre-wrap',
-				overflowWrap: 'anywhere',
-				maxHeight: '260px',
-				overflowY: 'auto',
-			},
-			row: {
-				display: 'flex',
-				flexWrap: 'wrap',
-				gap: '6px',
-			},
-			option: {
-				padding: '3px 10px',
-				border: '1px solid var(--dsw-alias-border-l1)',
-				borderRadius: '999px',
-				background: 'transparent',
-				color: 'var(--dsw-alias-label-primary)',
-				fontSize: '12px',
-				cursor: 'pointer',
-			},
-			optionOn: {
-				borderColor: 'var(--dsw-alias-brand-primary)',
-				color: 'var(--dsw-alias-brand-primary)',
-			},
-			input: {
-				width: '100%',
-				boxSizing: 'border-box',
-				padding: '6px 10px',
-				border: '1px solid var(--dsw-alias-border-l1)',
-				borderRadius: 'var(--dsw-radius-lg, 8px)',
-				background: 'var(--dsw-alias-bg-layer-2)',
-				color: 'var(--dsw-alias-label-primary)',
-				fontFamily: 'inherit',
-				fontSize: '13px',
-				resize: 'vertical',
-			},
-			primary: {
-				padding: '4px 12px',
-				border: '1px solid var(--dsw-alias-brand-primary)',
-				borderRadius: 'var(--dsw-radius-lg, 8px)',
-				background: 'var(--dsw-alias-brand-primary)',
-				color: 'var(--dsw-alias-bg-base)',
-				fontSize: '12px',
-				cursor: 'pointer',
-			},
-			ghost: {
-				padding: '4px 12px',
-				border: '1px solid var(--dsw-alias-border-l1)',
-				borderRadius: 'var(--dsw-radius-lg, 8px)',
-				background: 'transparent',
-				color: 'var(--dsw-alias-label-primary)',
-				fontSize: '12px',
-				cursor: 'pointer',
-			},
-			disabled: { opacity: 0.5, cursor: 'not-allowed' },
-			hint: { color: 'var(--dsw-alias-label-secondary)', fontSize: '12px' },
-			error: { color: 'var(--dsw-alias-state-error-primary)' },
-		};
-
 		/** The trigger glyph: a small sparkle, drawn in currentColor. */
 		function TriggerIcon() {
 			return h(
 				'svg',
 				{ viewBox: '0 0 16 16', width: 16, height: 16, 'aria-hidden': true, fill: 'currentColor' },
-				h('path', {
-					d: 'M8 1.2l1.5 4.1 4.1 1.5-4.1 1.5L8 12.4 6.5 8.3 2.4 6.8l4.1-1.5L8 1.2z',
-				}),
+				h('path', { d: 'M8 1.2l1.5 4.1 4.1 1.5-4.1 1.5L8 12.4 6.5 8.3 2.4 6.8l4.1-1.5L8 1.2z' }),
 				h('path', { d: 'M12.9 10.4l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9z' }),
 			);
 		}
@@ -381,9 +347,9 @@ window.__ModuleLoader__.load({
 				'button',
 				{
 					type: 'button',
+					className: `polish-btn${primary ? ' polish-btn-primary' : ''}`,
 					onClick,
 					disabled,
-					style: { ...(primary ? styles.primary : styles.ghost), ...(disabled ? styles.disabled : {}) },
 				},
 				label,
 			);
@@ -398,7 +364,6 @@ window.__ModuleLoader__.load({
 			function PolishButton({ sessionId, useInput }) {
 				const draft = useInput((state) => state.draft);
 				const state = usePolishState(sessionId);
-				const [hover, setHover] = React.useState(false);
 				const busy = state.phase !== 'idle' && state.phase !== 'error';
 
 				React.useEffect(() => {
@@ -411,18 +376,14 @@ window.__ModuleLoader__.load({
 					'button',
 					{
 						type: 'button',
+						className: 'polish-trigger',
+						'data-active': state.phase !== 'idle' ? 'true' : 'false',
 						title: '规范提示词（/polish）',
 						'aria-label': '规范提示词',
 						disabled: busy,
-						onMouseEnter: () => setHover(true),
-						onMouseLeave: () => setHover(false),
 						onClick: () => start(ctx, sessionId, stripCommand(draft)),
-						style: {
-							...styles.button,
-							...(hover || state.phase !== 'idle' ? styles.buttonActive : {}),
-							...(busy ? styles.buttonBusy : {}),
-						},
 					},
+					h(Styles),
 					h(TriggerIcon),
 				);
 			}
@@ -431,184 +392,205 @@ window.__ModuleLoader__.load({
 			function PolishOverlay({ sessionId, useInput, inputActions }) {
 				const state = usePolishState(sessionId);
 				const draft = useInput((current) => current.draft);
-				const [answers, setAnswers] = React.useState([]);
-				const [feedback, setFeedback] = React.useState('');
 				const [rejecting, setRejecting] = React.useState(false);
-				const questionKey = state.phase === 'clarifying' ? JSON.stringify(state.questions) : '';
+				const [feedback, setFeedback] = React.useState('');
 
-				React.useEffect(() => {
+				// Reset the per-question drafts whenever the question set or the phase
+				// changes. Done during render (React's documented "adjust state when a
+				// prop changes" pattern) rather than in an effect, so a keystroke can
+				// never race the reset and be swallowed.
+				const signature = state.phase === 'clarifying' ? JSON.stringify(state.questions) : state.phase;
+				const [draftSignature, setDraftSignature] = React.useState(signature);
+				const [answers, setAnswers] = React.useState([]);
+				if (draftSignature !== signature) {
+					setDraftSignature(signature);
 					setAnswers([]);
 					setFeedback('');
 					setRejecting(false);
-				}, [questionKey, state.phase]);
+				}
 
 				if (state.phase === 'idle') return null;
 
 				/**
-				 * Replace one answer.
+				 * Replace one answer slot.
 				 * @param index - question index.
-				 * @param value - the whole answer text.
+				 * @param next - the whole slot.
 				 */
-				const setAnswer = (index, value) => {
+				const setSlot = (index, next) => {
 					setAnswers((previous) => {
-						const next = [...previous];
-						next[index] = value;
-						return next;
+						const updated = [...previous];
+						updated[index] = next;
+						return updated;
 					});
 				};
 
 				/**
-				 * Toggle one offered option inside an answer.
+				 * Toggle one offered option inside an answer slot.
 				 * @param index - question index.
 				 * @param option - the option label.
 				 * @param multi - whether the question accepts several options.
 				 */
 				const toggleOption = (index, option, multi) => {
-					setAnswers((previous) => {
-						const next = [...previous];
-						const current = next[index] ?? '';
-						if (!multi) {
-							next[index] = current === option ? '' : option;
-							return next;
-						}
-						const parts = current === '' ? [] : current.split('、');
-						const at = parts.indexOf(option);
-						if (at === -1) parts.push(option);
-						else parts.splice(at, 1);
-						next[index] = parts.join('、');
-						return next;
-					});
+					const slot = answers[index] ?? EMPTY_ANSWER;
+					const chosen = slot.options.includes(option);
+					const options = multi
+						? chosen
+							? slot.options.filter((item) => item !== option)
+							: [...slot.options, option]
+						: chosen
+							? []
+							: [option];
+					setSlot(index, { ...slot, options });
 				};
 
 				const body = [];
 				if (state.phase === 'drafting') {
-					body.push(h('div', { key: 'busy', style: styles.hint }, '正在转写…'));
+					body.push(h('div', { key: 'busy', className: 'polish-hint' }, '正在转写…'));
 				} else if (state.phase === 'clarifying') {
-					body.push(h('div', { key: 'lead', style: styles.hint }, '信息还差一点，回答后继续：'));
 					state.questions.forEach((question, index) => {
 						const options = Array.isArray(question.options) ? question.options : [];
-						const answer = answers[index] ?? '';
+						const multi = isMulti(question);
+						const slot = answers[index] ?? EMPTY_ANSWER;
+						const chosen = (option) => slot.options.includes(option);
 						body.push(
-							h(
-								'div',
-								{ key: `q${index}`, style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
-								h('div', null, question.text ?? question.id ?? `问题 ${index + 1}`),
-								options.length === 0
-									? null
-									: h(
-											'div',
-											{ style: styles.row },
-											options.map((option) =>
-												h(
-													'button',
-													{
-														key: option,
-														type: 'button',
-														onClick: () => toggleOption(index, option, question.multi === true),
-														style: {
-															...styles.option,
-															...(answer.split('、').includes(option) ? styles.optionOn : {}),
-														},
-													},
-													option,
-												),
-											),
+							h('div', { key: `q${index}`, className: 'polish-options' }, [
+								h('p', { key: 'text', className: 'polish-q' }, question.text ?? question.id ?? `问题 ${index + 1}`),
+								...options.map((option, optionIndex) =>
+									h(
+										'button',
+										{
+											key: `opt${optionIndex}`,
+											type: 'button',
+											className: 'polish-option',
+											'data-selected': !multi && chosen(option) ? 'true' : 'false',
+											onClick: () => toggleOption(index, option, multi),
+										},
+										h(
+											'span',
+											{
+												className: 'polish-mark',
+												'data-checkbox': multi ? 'true' : 'false',
+												'data-checked': multi && chosen(option) ? 'true' : 'false',
+												'aria-hidden': true,
+											},
+											multi ? (chosen(option) ? '✓' : '') : String(optionIndex + 1),
 										),
-								h('textarea', {
-									rows: 2,
-									value: answer,
-									placeholder: '也可以直接写',
-									onChange: (event) => setAnswer(index, event.target.value),
-									style: styles.input,
-								}),
-							),
+										h('span', { className: 'polish-label' }, option),
+									),
+								),
+								h(
+									'div',
+									{
+										key: 'custom',
+										className: 'polish-custom',
+										'data-active': slot.custom.trim() === '' ? 'false' : 'true',
+									},
+									h(
+										'span',
+										{
+											className: 'polish-mark',
+											'data-checkbox': multi ? 'true' : 'false',
+											'data-checked': multi && slot.custom.trim() !== '' ? 'true' : 'false',
+											'aria-hidden': true,
+										},
+										multi ? (slot.custom.trim() === '' ? '' : '✓') : '✎',
+									),
+									h('textarea', {
+										className: 'polish-input',
+										rows: 1,
+										value: slot.custom,
+										placeholder: options.length > 0 ? '也可以直接写' : '写下你的回答',
+										onChange: (event) => setSlot(index, { ...slot, custom: event.target.value }),
+									}),
+								),
+							]),
 						);
 					});
 					body.push(
-						h(
-							'div',
-							{ key: 'actions', style: styles.row },
+						h('div', { key: 'actions', className: 'polish-foot' }, [
 							h(Action, {
+								key: 'go',
 								label: '继续',
 								primary: true,
-								onClick: () => submitAnswers(ctx, sessionId, state.questions.map((_, index) => answers[index] ?? '')),
+								onClick: () =>
+									submitAnswers(
+										ctx,
+										sessionId,
+										state.questions.map((_, index) => serializeAnswer(answers[index])),
+									),
 							}),
-							h(Action, { label: '放弃', onClick: () => dismiss(sessionId) }),
-							h('span', { style: styles.hint }, `最多再问 ${Math.max(0, MAX_ROUNDS - state.transcript.length - 1)} 轮`),
-						),
+							h(Action, { key: 'drop', label: '放弃', onClick: () => dismiss(sessionId) }),
+							h(
+								'span',
+								{ key: 'left', className: 'polish-hint' },
+								`最多再问 ${Math.max(0, MAX_ROUNDS - state.transcript.length - 1)} 轮`,
+							),
+						]),
 					);
 				} else if (state.phase === 'review') {
-					body.push(h('pre', { key: 'prompt', style: styles.pre }, state.prompt));
+					body.push(h('pre', { key: 'prompt', className: 'polish-pre' }, state.prompt));
 					if (state.assumptions.length > 0) {
-						body.push(
-							h(
-								'div',
-								{ key: 'assumptions', style: styles.hint },
-								`AI 的假设：${state.assumptions.join('；')}`,
-							),
-						);
+						body.push(h('div', { key: 'assumptions', className: 'polish-hint' }, `AI 的假设：${state.assumptions.join('；')}`));
 					}
 					if (typeof draft === 'string' && draft.trim() !== '') {
-						body.push(h('div', { key: 'overwrite', style: styles.hint }, '采用后会覆盖输入框现有内容。'));
+						body.push(h('div', { key: 'overwrite', className: 'polish-hint' }, '采用后会覆盖输入框现有内容。'));
 					}
 					if (rejecting) {
 						body.push(
 							h('textarea', {
 								key: 'feedback',
+								className: 'polish-block',
 								rows: 2,
 								value: feedback,
 								placeholder: '哪里不满意？（必填，会带进下一次转写）',
 								onChange: (event) => setFeedback(event.target.value),
-								style: styles.input,
 							}),
 						);
 					}
 					body.push(
-						h(
-							'div',
-							{ key: 'actions', style: styles.row },
-							h(Action, { label: '采用', primary: true, onClick: () => adopt(sessionId, inputActions) }),
+						h('div', { key: 'actions', className: 'polish-foot' }, [
+							h(Action, { key: 'adopt', label: '采用', primary: true, onClick: () => adopt(sessionId, inputActions) }),
 							rejecting
 								? h(Action, {
+										key: 'regen',
 										label: '重新生成',
 										disabled: feedback.trim() === '',
 										onClick: () => retry(ctx, sessionId, feedback),
 									})
-								: h(Action, { label: '不满意，重试', onClick: () => setRejecting(true) }),
-							h(Action, { label: '放弃', onClick: () => dismiss(sessionId) }),
-						),
+								: h(Action, { key: 'reject', label: '不满意，重试', onClick: () => setRejecting(true) }),
+							h(Action, { key: 'drop', label: '放弃', onClick: () => dismiss(sessionId) }),
+						]),
 					);
 				} else if (state.phase === 'error') {
-					body.push(h('div', { key: 'message', style: styles.error }, state.message));
+					body.push(h('div', { key: 'message', className: 'polish-error' }, state.message));
 					body.push(
-						h(
-							'div',
-							{ key: 'actions', style: styles.row },
+						h('div', { key: 'actions', className: 'polish-foot' }, [
 							state.code === 'polish/empty-input'
 								? null
-								: h(Action, { label: '重试', primary: true, onClick: () => retry(ctx, sessionId, '') }),
-							h(Action, { label: '关闭', onClick: () => dismiss(sessionId) }),
-						),
+								: h(Action, { key: 'retry', label: '重试', primary: true, onClick: () => retry(ctx, sessionId, '') }),
+							h(Action, { key: 'close', label: '关闭', onClick: () => dismiss(sessionId) }),
+						]),
 					);
 				}
 
+				const heading =
+					state.phase === 'review'
+						? '规范提示词'
+						: state.phase === 'clarifying'
+							? '规范提示词 · 需要澄清'
+							: state.phase === 'drafting'
+								? '规范提示词 · 转写中'
+								: '规范提示词 · 未完成';
+
 				return h(
 					'div',
-					{ style: styles.panel, 'data-polish-overlay': '' },
+					{ className: 'polish-panel', 'data-polish-overlay': '', onMouseDown: (event) => event.stopPropagation() },
+					h(Styles),
 					h(
 						'div',
-						{ style: styles.header },
-						h('span', null, state.phase === 'review' ? '规范提示词' : '规范提示词 · 转写中'),
-						h(
-							'button',
-							{
-								type: 'button',
-								onClick: () => dismiss(sessionId),
-								style: { ...styles.button, width: '20px', height: '20px' },
-								'aria-label': '关闭',
-							},
-							'✕',
-						),
+						{ className: 'polish-head' },
+						h('span', null, heading),
+						h('button', { type: 'button', className: 'polish-x', 'aria-label': '关闭', onClick: () => dismiss(sessionId) }, '✕'),
 					),
 					...body,
 				);

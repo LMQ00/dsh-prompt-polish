@@ -20,12 +20,20 @@
 | --- | --- |
 | `state` | 上表枚举 |
 | `source` | 本次转写的粗糙文本（触发时快照，之后不被输入框编辑影响） |
-| `origin` | 触发来源：`command`（有参数）/ `command-draft` / `button` |
-| `round` | 已完成的追问轮次，0..3 |
-| `transcript` | 追问问答记录：`{ questions[], answers[] }[]`，重试时保留 |
-| `draft` | 当前规范提示词（`review` 态） |
+| `transcript` | 追问问答记录：`{ questions[], answers[] }[]`，重试时保留。**轮次不单独存**：`transcript.length` 就是已完成轮次 |
+| `prompt` | 当前规范提示词（`review` 态） |
+| `assumptions` | 模型标注的假设（`review` 态） |
+| `questions` | 待回答的问题（`clarifying` 态） |
 | `error` | `{ code, message }`（`error` 态） |
-| `requestId` | 在途请求 id；响应不匹配即丢弃 |
+| `controller` | 该次请求的 `AbortController`；响应回来时若 store 里已不是发起时那个状态对象，直接丢弃 |
+
+### 浮层内的回答草稿（纯 UI 状态，不进 store）
+
+每个问题一个槽：`{ options: string[], custom: string }`。选项与自由填**并存**，提交时 `[...options, custom].filter(Boolean).join('、')` 序列化成 Host 收的字符串。
+
+用数组而不是拼接字符串存选项，是为了避免选项文案里出现 `、` 时把切换逻辑弄坏（v1 用字符串拼接，这是缺陷）。
+
+槽在「问题集合签名」或 phase 变化时重置；重置发生在 **render 阶段**（React 官方的「prop 变了就调整 state」写法），不用 effect —— effect 会和击键竞争，把输入吞掉。
 
 ## 迁移
 
