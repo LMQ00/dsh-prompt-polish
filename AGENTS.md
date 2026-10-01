@@ -31,3 +31,4 @@
 | D5 | 不建占位文档/占位文件：写不出真实内容的类型不建文件 | 提示词 |
 | D6 | 源码放仓库**根目录**（`package.json` / `cordis.patch.yml` / `index.js` / `client.js`），不建 `packages/` 子目录 | 提示词 |
 | D7 | 每完成一个业务就 commit，不必等用户开口；以 dsh 身份提交：`git commit --author="dsh <dsh@local>" --no-gpg-sign -m "<类型>: <文案>"`，类型取 `feat`/`fix`/`chore`/`docs`/`refactor` | 提示词 |
+| D8 | 文档与代码注释里不写本机绝对路径（`/home/…`、`/storage/…`、`/Users/…`、`C:\…`）与宿主安装路径（`/nix/store/…`、`node_modules/…` 的真实位置），一律用仓库相对路径；这类路径换台机器就失效，且暴露本机目录结构 | 提示词 |
