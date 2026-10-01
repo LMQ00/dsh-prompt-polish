@@ -5,7 +5,7 @@
 ## 环境
 
 - DSH `0.2.0-rc.2`，本机安装于 `/nix/store/phlcm79hb1aym7w3xdspj5qrgz8g4qjg-dsh-0.2.0-rc.2/`。
-- 本仓库根目录 `/home/LMQ/github/提示词` 即 bundle 包本体。
+- 本仓库根目录 `/home/LMQ/Documents/deepseek-harness/dsh-prompt-polish` 即 bundle 包本体。
 - 无构建步骤、无 `node_modules`、无包管理器安装：源码就是可加载的 ESM。
 
 ## 权威信息源（按顺序）
@@ -19,7 +19,7 @@
 ## 安装与生效
 
 ```
-plugin_manager action=install_bundle target=/home/LMQ/github/提示词
+plugin_manager action=install_bundle target=/home/LMQ/Documents/deepseek-harness/dsh-prompt-polish
 ```
 
 - 改动影响当前 profile 的所有会话，并跨重启保留。

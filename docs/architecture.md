@@ -8,10 +8,10 @@
 
 ## 目录结构
 
-源码放仓库根目录（规则 D6）；整个仓库根目录就是可安装 bundle，`plugin_manager install_bundle` 的 target 即 `/home/LMQ/github/提示词`。
+源码放仓库根目录（规则 D6）；整个仓库根目录就是可安装 bundle，`plugin_manager install_bundle` 的 target 即 `/home/LMQ/Documents/deepseek-harness/dsh-prompt-polish`。
 
 ```
-/home/LMQ/github/提示词/
+/home/LMQ/Documents/deepseek-harness/dsh-prompt-polish/
 ├── AGENTS.md          # 文档索引 + 开发规范规则
 ├── package.json       # bundle 清单
 ├── cordis.patch.yml   # 插件行 + Config
