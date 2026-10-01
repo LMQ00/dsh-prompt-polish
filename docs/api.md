@@ -79,11 +79,24 @@
 - 路由：`POST /polish/translate`（`kind: 'exact'`，插件自己注册在 `webServer` 上）。
 - 认证：先过 `ctx.connection.requestRejection({ headers })`，不过则 401 / 403（响应体 `unauthorized` / `forbidden`）。**已实测**：无 cookie 的 POST 得到 401 `unauthorized`，未注册路径得到 404。
 - 请求体上限 64 KiB（`MAX_BODY_BYTES`）→ 超限 413；非 POST → 405；非 JSON → 400。
-- 请求：`{ text: string, transcript: [{ questions, answers }], feedback: string }`。
+- 请求：`{ sessionId?: string, text: string, transcript: [{ questions, answers }], feedback: string }`。
+- `sessionId` 只用于**读**该会话最近的消息作为消歧上下文（见下）；缺失或读取失败一律降级为「无上下文」，不影响转写。
 - 成功（HTTP 200）：`{ ok: true, value: { kind:'questions', questions } | { kind:'prompt', prompt, assumptions } }`。
 - 业务失败（HTTP 200）：`{ ok: false, error: { code, message, details } }`。
 
 用 200 承载业务失败是刻意的：`ok` 字段已经区分成功/失败，HTTP 状态只表示传输层结果，Client 据此把两类失败分开报（HTTP 非 2xx → `polish/transport-error`）。
+
+## 上下文读取（只读）
+
+用户追加要求：「要能读上下文」。做法：
+
+- Host 用 `ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none', signal })` 取该会话的原始事件快照，读完 `[Symbol.dispose]()` 释放。
+- 只取 `user/message`（`data.content`）与 `assistant/message`（`data.message.content`）里的 `type:'text'` 块，渲染成 `用户：…` / `助手：…`。
+- 取**尾部**最多 `MAX_CONTEXT_MESSAGES = 8` 条、总长最多 `MAX_CONTEXT_CHARS = 6000` 字符（超长保留尾部）。
+- 任何失败（空会话、冷日志读不出、服务缺失）→ 返回空串，**不**让转写失败。
+- 上下文只用于消歧，system prompt 明确要求「不要复述上下文，不要把上下文里的内容当成要转写的请求」。
+
+这**不违反**「不进会话历史」：那条边界管的是**写**（不追加事件、不污染模型上下文），这里是纯读。
 
 ## 错误码
 

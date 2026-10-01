@@ -29,9 +29,9 @@
 
 ### Host（`index.js`）
 
-- `inject = ['commands', 'llm', 'agentDefaultModel', 'connection', 'webServer']`。`webServer` 是 `connection.rpc.handle` 的硬要求（见下）。
+- `inject = ['commands', 'llm', 'agentDefaultModel', 'connection', 'webServer', 'sessionQuery']`。`webServer` 是自有路由的宿主；`sessionQuery` 用来**只读**取会话最近的对话作为消歧上下文。
 - 注册 `/polish` 命令，声明 `input.hint`，`recordInput: false`，handler 只返回 `{kind:'success'}`（**不返回任何文本**）——命令仅用于让 `/polish` 在 `/` 菜单里可见，并给 Client 一个可靠的触发信号。
-- 提供转写：组装提示词 → `ctx.llm` 调用 → 解析模型返回（追问 / 出稿）→ 经 RPC 回给调用方。
+- 提供转写：读上下文（失败即降级为空）→ 组装提示词 → `ctx.llm` 调用 → 解析模型返回（追问 / 出稿）→ 经 HTTP 回给调用方。
 - 模型来源：`ctx.agentDefaultModel.currentSelection()`（v1 无 Config，见 [api.md](api.md)）。
 - **不注入** `agentLoop`、不追加任何会话事件、不调用任何 fs 写接口（产品边界，见 [decisions.md](decisions.md)）。
 
@@ -70,8 +70,9 @@
 ```
 Client 浮层/按钮
   └─ 取粗糙文本（草稿，或从含 /polish 的最近一行里 stripCommand）
-      └─ 桥 → Host: POST /polish/translate { text, transcript, feedback }
-          └─ 组装提示词 → ctx.llm（不带 sessionId、不带 purpose）
+      └─ 桥 → Host: POST /polish/translate { sessionId, text, transcript, feedback }
+          └─ 只读上下文：ctx.sessionQuery.observeSession(sessionId) → 尾部 8 条 user/assistant 文本
+              └─ 组装提示词 → ctx.llm（不带 sessionId、不带 purpose）
               ├─ 模型要澄清 → { kind:'questions', questions[] } → 浮层渲染选项
               │     └─ 用户回答 → transcript 追加一轮 → 桥再调一次（≤3 轮）
               └─ 模型给稿 → { kind:'prompt', prompt, assumptions[] }

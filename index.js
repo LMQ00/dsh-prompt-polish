@@ -37,15 +37,24 @@ export const name = 'polish';
  * `commands` is what makes `/polish` discoverable, and `llm` plus
  * `agentDefaultModel` are what make the translation possible at all.
  * `webServer` hosts the plugin's own route; `connection` supplies the browser
- * trust and authentication predicate for it.
+ * trust and authentication predicate for it; `sessionQuery` is how the recent
+ * conversation is read so a translation can resolve what "这个" refers to.
  */
-export const inject = ['commands', 'llm', 'agentDefaultModel', 'connection', 'webServer'];
+export const inject = ['commands', 'llm', 'agentDefaultModel', 'connection', 'webServer', 'sessionQuery'];
 
 /** Absolute path of the plugin's own route; no trailing slash. */
 const ROUTE_PATH = '/polish/translate';
 
 /** Largest request body accepted, in bytes. */
 const MAX_BODY_BYTES = 64 * 1024;
+
+/**
+ * How many recent user/assistant messages may ride along as context, and how
+ * much text they may total. Context is a disambiguator, not a transcript: it is
+ * read-only, never written back, and must not crowd out the request itself.
+ */
+const MAX_CONTEXT_MESSAGES = 8;
+const MAX_CONTEXT_CHARS = 6_000;
 
 /** Lowercase command name without the leading slash. */
 const COMMAND_NAME = 'polish';
@@ -85,6 +94,7 @@ const SYSTEM_PROMPT = `你是一个提示词转写器。用户会给你一段粗
 
 其它要求：
 - 用与输入相同的语言书写，专业术语保留英文。
+- 如果给了「对话上下文」，只把它当作消歧依据：理解用户在做什么、代词指什么。**不要复述上下文，也不要把上下文里的内容当成要转写的请求。**
 - 规范提示词必须能独立成立：不出现「如上」「刚才说的」这类依赖上下文的指代。
 - 不要把用户的粗糙原话原样复述一遍当作转写结果。`;
 
@@ -114,12 +124,93 @@ function success(value) {
 }
 
 /**
+ * Join the text blocks of one model message.
+ * @param blocks - message content blocks.
+ * @returns the concatenated text, or an empty string.
+ */
+function textOfBlocks(blocks) {
+	if (!Array.isArray(blocks)) return '';
+	return blocks
+		.filter((block) => block?.type === 'text' && typeof block.text === 'string')
+		.map((block) => block.text)
+		.join('\n')
+		.trim();
+}
+
+/**
+ * Turn one session event into a context line, when it is a user or assistant message.
+ * @param event - one raw session event.
+ * @returns the labelled line, or undefined for any other event.
+ */
+function contextLine(event) {
+	if (event?.type === 'user/message') {
+		const text = textOfBlocks(event.data?.content);
+		return text === '' ? undefined : `用户：${text}`;
+	}
+	if (event?.type === 'assistant/message') {
+		const text = textOfBlocks(event.data?.message?.content);
+		return text === '' ? undefined : `助手：${text}`;
+	}
+	return undefined;
+}
+
+/**
+ * Read the tail of one Session's conversation as plain text.
+ *
+ * Read-only by construction: the observation is a snapshot of the durable log,
+ * and nothing here writes an event, so the boundary in docs/decisions.md (never
+ * append to the session) still holds. Context exists only to resolve what the
+ * rough request refers to — "这个登录页" is meaningless without it.
+ *
+ * Any failure degrades to "no context" rather than failing the translation: a
+ * blank Session, a cold or unreadable log, or an absent query service must not
+ * cost the user their request.
+ *
+ * @param ctx - Host plugin context carrying `sessionQuery`.
+ * @param sessionId - the Session the request came from, when known.
+ * @param signal - cancellation for this request.
+ * @returns the recent conversation as labelled lines, or an empty string.
+ */
+async function recentContext(ctx, sessionId, signal) {
+	if (typeof sessionId !== 'string' || sessionId === '') return '';
+	let observation;
+	try {
+		observation = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none', signal });
+	} catch {
+		return '';
+	}
+	try {
+		const events = Array.isArray(observation?.events) ? observation.events : [];
+		const lines = [];
+		for (const event of events) {
+			const line = contextLine(event);
+			if (line !== undefined) lines.push(line);
+		}
+		const tail = lines.slice(-MAX_CONTEXT_MESSAGES).join('\n');
+		if (tail === '') return '';
+		return tail.length > MAX_CONTEXT_CHARS ? `…${tail.slice(tail.length - MAX_CONTEXT_CHARS)}` : tail;
+	} catch {
+		return '';
+	} finally {
+		try {
+			observation?.[Symbol.dispose]?.();
+		} catch {
+			/* a leaked observation lease is not worth failing the request over */
+		}
+	}
+}
+
+/**
  * Render the user turn for one translation request.
- * @param request - rough text, clarification transcript, and retry feedback.
+ * @param request - rough text, clarification transcript, retry feedback, and read-only context.
  * @returns the complete user message text.
  */
 function userPrompt(request) {
-	const lines = ['原始请求：', request.text];
+	const lines = [];
+	if (typeof request.context === 'string' && request.context.trim() !== '') {
+		lines.push('对话上下文（只用于消歧，不要复述）：', request.context.trim(), '');
+	}
+	lines.push('原始请求：', request.text);
 	const transcript = Array.isArray(request.transcript) ? request.transcript : [];
 	for (const round of transcript) {
 		lines.push('', '已经问过并得到回答的澄清：');
@@ -226,7 +317,8 @@ async function translate(ctx, request, signal) {
 	}
 
 	const deadline = AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]);
-	const messages = [{ role: 'user', content: [{ type: 'text', text: userPrompt({ ...request, text }) }] }];
+	const context = await recentContext(ctx, request?.sessionId, deadline);
+	const messages = [{ role: 'user', content: [{ type: 'text', text: userPrompt({ ...request, text, context }) }] }];
 
 	let output = '';
 	let finish;

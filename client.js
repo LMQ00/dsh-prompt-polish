@@ -214,6 +214,7 @@ window.__ModuleLoader__.load({
 					method: 'POST',
 					headers: { 'content-type': 'application/json' },
 					body: JSON.stringify({
+						sessionId,
 						text: state.source,
 						transcript: state.transcript,
 						feedback: state.feedback ?? '',
