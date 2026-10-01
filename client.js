@@ -46,40 +46,42 @@ window.__ModuleLoader__.load({
 		const EMPTY_ANSWER = { options: [], custom: '' };
 
 		/**
-		 * Component-local stylesheet. Rendered as a React element so unmounting
-		 * removes it, and guarded by a data attribute so two mounts never stack
-		 * duplicate rules.
+		 * Component-local stylesheet, injected once by {@link installStyles}.
+		 *
+		 * Sizing is deliberately tight: the panel sits directly above the composer
+		 * and must not push the conversation around. Width is capped to the chat
+		 * content column so it reads as part of the composer, not a page.
 		 */
 		const CSS = `
-.polish-panel{display:flex;flex-direction:column;gap:10px;margin:0 0 8px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-xl,12px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px;box-shadow:var(--dsw-elevation-panel,none)}
+.polish-panel{display:flex;flex-direction:column;gap:6px;width:100%;max-width:var(--dsh-chat-content-width,748px);max-height:45vh;overflow-y:auto;margin:0 auto 6px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg,8px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}
 .polish-panel *{box-sizing:border-box}
-.polish-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
-.polish-x{width:22px;height:22px;padding:0;border:0;border-radius:999px;background:0 0;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));cursor:pointer;display:grid;place-items:center}
+.polish-head{display:flex;align-items:center;justify-content:space-between;gap:6px;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
+.polish-x{width:20px;height:20px;padding:0;border:0;border-radius:999px;background:0 0;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));cursor:pointer;display:grid;place-items:center;font-size:11px}
 .polish-x:hover{background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2));color:var(--dsw-alias-label-primary)}
-.polish-q{margin:0;font-size:14px;font-weight:500;line-height:22px}
-.polish-options{display:flex;flex-direction:column;gap:1px;margin:2px 0 0}
-.polish-option{display:flex;align-items:flex-start;gap:8px;width:100%;min-height:40px;padding:8px 12px 8px 8px;border:1px solid transparent;border-radius:var(--dsw-radius-md,8px);background:0 0;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:background-color .12s,border-color .12s}
+.polish-q{margin:0;font-size:13px;font-weight:500;line-height:20px}
+.polish-options{display:flex;flex-direction:column;gap:0;margin:0}
+.polish-option{display:flex;align-items:flex-start;gap:6px;width:100%;min-height:26px;padding:3px 8px 3px 6px;border:1px solid transparent;border-radius:var(--dsw-radius-sm,6px);background:0 0;color:inherit;font:inherit;text-align:left;cursor:pointer;transition:background-color .12s,border-color .12s}
 .polish-option:hover{background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2))}
 .polish-option[data-selected="true"]{background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2));border-color:var(--dsw-alias-border-l2)}
-.polish-mark{flex:0 0 20px;width:20px;height:20px;margin-top:2px;display:grid;place-items:center;border-radius:var(--dsw-radius-xs,4px);background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:500;line-height:18px}
+.polish-mark{flex:0 0 16px;width:16px;height:16px;margin-top:2px;display:grid;place-items:center;border-radius:var(--dsw-radius-xs,3px);background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-secondary);font-size:10px;font-weight:500;line-height:14px}
 .polish-mark[data-checkbox="true"]{background:0 0;border:.5px solid var(--dsw-alias-border-l1)}
 .polish-mark[data-checked="true"]{background:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-base)}
-.polish-label{flex:1;min-width:0;font-size:14px;line-height:24px}
-.polish-custom{display:flex;align-items:flex-start;gap:8px;width:100%;min-height:40px;padding:8px 12px 8px 8px;border:1px solid transparent;border-radius:var(--dsw-radius-md,8px);transition:background-color .12s,border-color .12s}
+.polish-label{flex:1;min-width:0;font-size:13px;line-height:20px}
+.polish-custom{display:flex;align-items:flex-start;gap:6px;width:100%;min-height:26px;padding:3px 8px 3px 6px;border:1px solid transparent;border-radius:var(--dsw-radius-sm,6px);transition:background-color .12s,border-color .12s}
 .polish-custom[data-active="true"],.polish-custom:focus-within{background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2));border-color:var(--dsw-alias-border-l2)}
-.polish-input{flex:1;min-width:0;margin-top:2px;padding:0;border:0;outline:0;background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:24px;resize:none}
+.polish-input{flex:1;min-width:0;margin-top:2px;padding:0;border:0;outline:0;background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;resize:none}
 .polish-input::placeholder{color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary))}
-.polish-block{width:100%;padding:8px 12px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg,8px);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;font-size:14px;line-height:22px;outline:0;resize:vertical}
+.polish-block{width:100%;padding:5px 8px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm,6px);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;line-height:20px;outline:0;resize:vertical}
 .polish-block:focus{border-color:var(--dsw-alias-brand-primary)}
-.polish-pre{margin:0;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg,8px);background:var(--dsw-alias-bg-layer-2);font-family:inherit;font-size:14px;line-height:22px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:280px;overflow-y:auto}
-.polish-hint{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
-.polish-error{color:var(--dsw-alias-state-error-primary);font-size:13px;line-height:20px}
-.polish-foot{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
-.polish-btn{padding:4px 12px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg,8px);background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:20px;cursor:pointer}
+.polish-pre{margin:0;padding:6px 8px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm,6px);background:var(--dsw-alias-bg-layer-2);font-family:inherit;font-size:13px;line-height:20px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:160px;overflow-y:auto}
+.polish-hint{color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
+.polish-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:18px}
+.polish-foot{display:flex;align-items:center;flex-wrap:wrap;gap:6px}
+.polish-btn{padding:2px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm,6px);background:0 0;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;line-height:18px;cursor:pointer}
 .polish-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2))}
 .polish-btn:disabled{opacity:.5;cursor:not-allowed}
 .polish-btn-primary{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-bg-base)}
-.polish-trigger{width:28px;height:28px;padding:0;display:grid;place-items:center;border:1px solid transparent;border-radius:var(--dsw-radius-lg,8px);background:0 0;color:var(--dsw-alias-label-secondary);cursor:pointer}
+.polish-trigger{width:26px;height:26px;padding:0;display:grid;place-items:center;border:1px solid transparent;border-radius:var(--dsw-radius-sm,6px);background:0 0;color:var(--dsw-alias-label-secondary);cursor:pointer}
 .polish-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,var(--dsw-alias-bg-layer-2));color:var(--dsw-alias-label-primary)}
 .polish-trigger[data-active="true"]{color:var(--dsw-alias-brand-primary)}
 .polish-trigger:disabled{opacity:.5;cursor:progress}
@@ -621,7 +623,7 @@ window.__ModuleLoader__.load({
 						h('textarea', {
 							key: 'source',
 							className: 'polish-block',
-							rows: 3,
+							rows: 2,
 							value: sourceDraft,
 							placeholder: '写下你的粗糙请求，例如：帮我写个登录页',
 							onChange: (event) => setSourceDraft(event.target.value),
