@@ -1,16 +1,19 @@
 # 数据模型：浮层状态机
 
-> 状态：设计已定，代码待实现。浮层是单实例、每会话一个；状态少，用普通对象 + 订阅，不引入状态管理库。
+> 状态：**已实现**（`client.js` 的 `readState`/`writeState`）。浮层是单实例、每会话一个；状态少，用普通对象 + 订阅，不引入状态管理库。
 
 ## 状态
 
 | 状态 | 浮层可见 | 含义 |
 | --- | --- | --- |
 | `idle` | 否 | 未触发，或已关闭 |
+| `input` | 是 | 没有现成粗糙文本（草稿为空）时打开：面板内给一个可编辑文本框 + 「转写」 |
 | `drafting` | 是 | 已发出转写请求，等待模型；展示加载态 |
-| `clarifying` | 是 | 模型判定有缺口，展示追问（选项 + 自由填）；带 `round`（1..3） |
+| `clarifying` | 是 | 模型判定有缺口，展示追问（选项 + 自由填） |
 | `review` | 是 | 展示只读规范提示词 + 采用 / 带反馈重试 / 放弃 |
-| `error` | 是 | 展示失败原因 + 重试；用户已输入的粗糙文本保留 |
+| `error` | 是 | 展示失败原因 + **可编辑的原文** + 「转写」；已输入的粗糙文本保留 |
+
+`input` 是第 1 轮开发后补的状态：原本草稿为空只弹一句「先写点东西」，用户反馈「面板里不能输入」——需求本来就是想在面板里直接写，而不是被赶回输入框。
 
 终态只有两个，都回到 `idle`：`adopted`（已写入输入框）与 `discarded`（用户放弃）。
 
@@ -40,18 +43,20 @@
 | 从 | 事件 | 到 |
 | --- | --- | --- |
 | `idle` | 触发（有文本） | `drafting` |
-| `idle` | 触发（无参数且草稿为空） | `idle` + 浮层提示「先写点东西」（不调模型） |
-| `drafting` | 模型要澄清且 `round < 3` | `clarifying`（`round+1`） |
-| `drafting` | 模型要澄清且 `round == 3` | `review`（直接出稿，稿内显式标注假设） |
+| `idle` | 触发（无参数且草稿为空） | `input`（面板内可编辑文本框，不调模型） |
+| `input` | 点「转写」且文本非空 | `drafting`（`transcript` 为空） |
+| `input` | 点「关闭」 | `idle`（discarded） |
+| `drafting` | 模型要澄清且 `transcript.length < 3` | `clarifying` |
+| `drafting` | 模型要澄清且已达上限 | `review`（直接出稿，稿内显式标注假设；实际由 Host 提示词强制） |
 | `drafting` | 模型给稿 | `review` |
 | `drafting` | 调用失败 | `error` |
-| `clarifying` | 用户回答并提交 | `drafting` |
+| `clarifying` | 用户回答并提交 | `drafting`（`transcript` 追加一轮） |
 | `clarifying` | 用户放弃 | `idle`（discarded） |
-| `review` | 采用 | `idle`（adopted）+ `setDraft(draft)` |
+| `review` | 采用 | `idle`（adopted）+ `setDraft(prompt)` |
 | `review` | 带反馈重试 | `drafting`（保留 `transcript`，附加 `feedback`） |
 | `review` | 放弃 | `idle`（discarded） |
-| `error` | 重试 | `drafting`（沿用 `source`） |
-| `error` | 放弃 | `idle`（discarded） |
+| `error` | 点「转写」（原文可改） | `drafting`（沿用 `transcript`，**保留已问到的澄清轮次**） |
+| `error` | 关闭 | `idle`（discarded） |
 
 ## 追问的硬约束
 
@@ -61,8 +66,8 @@
 
 ## 竞态与边界
 
-- **过期响应**：响应 `requestId` 与当前不符 → 丢弃。
+- **过期响应**：响应回来时 `readState(sessionId)` 已不是发起时那个状态对象 → 丢弃（等价于请求 id，少一层状态）。
 - **中途切换会话**：丢弃在途结果，关闭浮层，不写新会话的输入框。
-- **重复触发**：`drafting`/`clarifying`/`review` 中再次触发 → 忽略（不打断在途请求）。
+- **重复触发**：`drafting`/`clarifying`/`review` 中再次触发 → 新请求先 `abort` 掉旧请求再接管。
 - **输入框被用户改动**：`source` 是触发时的快照，用户后续编辑输入框不影响本次转写；但「采用」仍是整段替换，会在浮层上二次提示当前草稿将被覆盖。
 - **浮层无会话**：`conversation.input.dock` 只在有 session 时渲染；无会话时不显示，按钮同理置灰。

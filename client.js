@@ -260,22 +260,50 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
-		 * Open the overlay for one Session and start the first translation.
+		 * Start (or restart) a translation from one explicit source text.
+		 *
+		 * Keeping the transcript separate is what lets an error retry resume after
+		 * clarification instead of throwing the rounds away.
+		 *
 		 * @param ctx - Client plugin context.
 		 * @param sessionId - the Session.
-		 * @param text - the rough text.
+		 * @param source - the rough text, already trimmed.
+		 * @param transcript - clarification rounds to carry into this attempt.
+		 */
+		function translateWith(ctx, sessionId, source, transcript) {
+			const previous = readState(sessionId);
+			if (previous.controller !== undefined) previous.controller.abort();
+			const state = {
+				phase: 'drafting',
+				source,
+				transcript: Array.isArray(transcript) ? transcript : [],
+				feedback: '',
+				controller: new AbortController(),
+			};
+			writeState(sessionId, state);
+			void run(ctx, sessionId, state);
+		}
+
+		/**
+		 * Open the overlay for one Session.
+		 *
+		 * With text in hand it starts translating; with none it opens the panel in
+		 * its input phase, so the rough request can be typed right there instead of
+		 * sending the user back to the composer.
+		 *
+		 * @param ctx - Client plugin context.
+		 * @param sessionId - the Session.
+		 * @param text - the rough text, possibly empty.
 		 */
 		function start(ctx, sessionId, text) {
 			const source = typeof text === 'string' ? text.trim() : '';
 			if (source === '') {
-				writeState(sessionId, { phase: 'error', code: 'polish/empty-input', message: '先写点东西再触发转写', source: '' });
+				const previous = readState(sessionId);
+				if (previous.controller !== undefined) previous.controller.abort();
+				writeState(sessionId, { phase: 'input', source: '' });
 				return;
 			}
-			const previous = readState(sessionId);
-			if (previous.controller !== undefined) previous.controller.abort();
-			const state = { phase: 'drafting', source, transcript: [], feedback: '', controller: new AbortController() };
-			writeState(sessionId, state);
-			void run(ctx, sessionId, state);
+			translateWith(ctx, sessionId, source, []);
 		}
 
 		/**
@@ -412,18 +440,25 @@ window.__ModuleLoader__.load({
 				const [rejecting, setRejecting] = React.useState(false);
 				const [feedback, setFeedback] = React.useState('');
 
-				// Reset the per-question drafts whenever the question set or the phase
-				// changes. Done during render (React's documented "adjust state when a
-				// prop changes" pattern) rather than in an effect, so a keystroke can
-				// never race the reset and be swallowed.
-				const signature = state.phase === 'clarifying' ? JSON.stringify(state.questions) : state.phase;
+				// Reset the per-question drafts and the editable source whenever the
+				// question set or the phase changes. Done during render (React's
+				// documented "adjust state when a prop changes" pattern) rather than in
+				// an effect, so a keystroke can never race the reset and be swallowed.
+				const signature =
+					state.phase === 'clarifying'
+						? `clarify:${JSON.stringify(state.questions)}`
+						: state.phase === 'input' || state.phase === 'error'
+							? `${state.phase}:${state.source ?? ''}`
+							: state.phase;
 				const [draftSignature, setDraftSignature] = React.useState(signature);
 				const [answers, setAnswers] = React.useState([]);
+				const [sourceDraft, setSourceDraft] = React.useState(state.source ?? '');
 				if (draftSignature !== signature) {
 					setDraftSignature(signature);
 					setAnswers([]);
 					setFeedback('');
 					setRejecting(false);
+					setSourceDraft(state.source ?? '');
 				}
 
 				if (state.phase === 'idle') return null;
@@ -578,13 +613,31 @@ window.__ModuleLoader__.load({
 							h(Action, { key: 'drop', label: '放弃', onClick: () => dismiss(sessionId) }),
 						]),
 					);
-				} else if (state.phase === 'error') {
-					body.push(h('div', { key: 'message', className: 'polish-error' }, state.message));
+				} else if (state.phase === 'input' || state.phase === 'error') {
+					if (state.phase === 'error') {
+						body.push(h('div', { key: 'message', className: 'polish-error' }, state.message));
+					}
+					body.push(
+						h('textarea', {
+							key: 'source',
+							className: 'polish-block',
+							rows: 3,
+							value: sourceDraft,
+							placeholder: '写下你的粗糙请求，例如：帮我写个登录页',
+							onChange: (event) => setSourceDraft(event.target.value),
+						}),
+					);
 					body.push(
 						h('div', { key: 'actions', className: 'polish-foot' }, [
-							state.code === 'polish/empty-input'
-								? null
-								: h(Action, { key: 'retry', label: '重试', primary: true, onClick: () => retry(ctx, sessionId, '') }),
+							h(Action, {
+								key: 'go',
+								label: '转写',
+								primary: true,
+								disabled: sourceDraft.trim() === '',
+								// An error retry keeps the clarification rounds already earned;
+								// a first attempt from the input phase starts with none.
+								onClick: () => translateWith(ctx, sessionId, sourceDraft.trim(), state.transcript ?? []),
+							}),
 							h(Action, { key: 'close', label: '关闭', onClick: () => dismiss(sessionId) }),
 						]),
 					);
@@ -597,7 +650,9 @@ window.__ModuleLoader__.load({
 							? '规范提示词 · 需要澄清'
 							: state.phase === 'drafting'
 								? '规范提示词 · 转写中'
-								: '规范提示词 · 未完成';
+								: state.phase === 'input'
+									? '规范提示词 · 输入请求'
+									: '规范提示词 · 未完成';
 
 				return h(
 					'div',
