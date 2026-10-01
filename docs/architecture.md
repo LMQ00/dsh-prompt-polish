@@ -49,19 +49,20 @@
 
 **已定：Connection 的通用 RPC 通道。**
 
-- Host：`ctx.connection.rpc.handle('/polish', handler)`，端点 `translate`。
-- Client：`ctx.connection.rpc.call('/polish', 'translate', payload, signal)`。
+- Host：`ctx.webServer.register({ kind: 'exact', path: '/polish/translate', handler })`。
+- Client：`fetch('polish/translate', { method: 'POST', body: JSON.stringify(payload) })`（相对路径，解析方式与 shipped 的 `/api` 通道一致）。
 
 为什么是它：
 
-- 它是 Host 与 Client 之间唯一不需要代码生成的通用调用路径（`ctx.remote.*` 命名空间需要 Typert 生成产物，本仓库是普通 JS、无构建步骤）。
-- 请求与响应走 HTTP，**不落会话日志**，符合产品边界。
-- 代价：`rpc.handle` 把物理路由挂在**读取该服务的 Context 自己的 `webServer`** 上，所以 Host 半边的 `inject` 必须包含 `webServer`，否则注册直接抛 `cannot get property "webServer" without inject`（实测踩过）。
+- `ctx.remote.*` 命名空间需要 Typert 生成产物，本仓库是普通 JS、无构建步骤，用不了。
+- **`ctx.connection.rpc.handle` 在这套组合里不可用**（实测）：它把物理路由挂在 connection 服务**自己的 ctx** 上（`dsh-client-connection/lib/index.js` 里 `register(this.ctx, …)`），而那个 ctx 的 inject 只有 `credentials` + `webRuntime`，从不含 `webServer` —— 于是**任何调用方**都会撞 `cannot get property "webServer" without inject`。给本插件加 `webServer` 到 inject 没用，因为 owner 不是本插件。
+- `rpc.intercept('/api', …)` 也不是退路：API Gateway 已经占了 `/api` 的唯一 interceptor。
+- 自有路由 + 普通 `fetch` 走 HTTP，**不落会话日志**，符合产品边界；认证复用 shipped 的 `ctx.connection.requestRejection({ headers })`（loopback + browser-session 双重检查），不手写认证。
 
 约束：
 
 - 桥只承载「请求转写」与「返回结果」两类消息，不做流式渲染。
-- 在途请求的作废靠 **AbortController + 状态对象身份比较**（响应回来时若 `readState(sessionId)` 已不是发起时那个对象，直接丢弃），不额外造请求 id。
+- 在途请求的作废靠 **AbortController + 状态对象身份比较**（响应回来时若 `readState(sessionId)` 已不是发起时那个对象，直接丢弃），不额外造请求 id。Host 侧在 `res.on('close')` 且未回包时 abort，避免用户关掉浮层后还继续烧 token。
 - 浮层中途切换会话：丢弃在途结果，不写进新会话的输入框。
 
 ## 数据流（时序）
@@ -69,7 +70,7 @@
 ```
 Client 浮层/按钮
   └─ 取粗糙文本（草稿，或从含 /polish 的最近一行里 stripCommand）
-      └─ 桥 → Host: call('/polish', 'translate', { text, transcript, feedback })
+      └─ 桥 → Host: POST /polish/translate { text, transcript, feedback }
           └─ 组装提示词 → ctx.llm（不带 sessionId、不带 purpose）
               ├─ 模型要澄清 → { kind:'questions', questions[] } → 浮层渲染选项
               │     └─ 用户回答 → transcript 追加一轮 → 桥再调一次（≤3 轮）

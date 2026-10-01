@@ -2,9 +2,9 @@
  * `/polish` — Host half.
  *
  * Turns a rough request into a规范 prompt through one direct `ctx.llm` call and
- * returns the result over a Connection RPC channel. The Client half owns every
- * piece of UI: the trigger button, the overlay above the composer, and the
- * `setDraft` write.
+ * returns the result over one HTTP route the plugin registers itself. The
+ * Client half owns every piece of UI: the trigger button, the overlay above the
+ * composer, and the `setDraft` write.
  *
  * Boundaries this half must keep (see docs/decisions.md):
  * - never touches `agentLoop` and never appends a session event, so nothing
@@ -18,27 +18,34 @@
  * so neither the rough text nor the finished prompt is written to the session
  * log. The Client supplies the text it captured from the composer.
  *
+ * Why an own route instead of `ctx.connection.rpc.handle`: `handle` mounts its
+ * physical route through the *connection service's own* context
+ * (`dsh-client-connection/lib/index.js` calls `register(this.ctx, …)`), and that
+ * context injects only `credentials` plus `webRuntime` — never `webServer`.
+ * Every caller therefore dies with `cannot get property "webServer" without
+ * inject`. `rpc.intercept` is no escape either: the API Gateway already owns
+ * the single `/api` interceptor. So the plugin mounts its own `webServer` route
+ * and reuses `connection.requestRejection` for browser trust and
+ * authentication.
+ *
  * @module @local/dsh-polish
  */
 
 export const name = 'polish';
 
 /**
- * All five Services exist in every composed Web profile. `commands` is what
- * makes `/polish` discoverable, and `llm` plus `agentDefaultModel` are what
- * make the translation possible at all.
- *
- * `webServer` is required by `connection.rpc.handle`: the channel registration
- * mounts its physical route on the reading context's own `webServer`, so this
- * plugin must inject it or the registration refuses.
+ * `commands` is what makes `/polish` discoverable, and `llm` plus
+ * `agentDefaultModel` are what make the translation possible at all.
+ * `webServer` hosts the plugin's own route; `connection` supplies the browser
+ * trust and authentication predicate for it.
  */
 export const inject = ['commands', 'llm', 'agentDefaultModel', 'connection', 'webServer'];
 
-/** Absolute logical RPC channel owned by this plugin. */
-const CHANNEL = '/polish';
+/** Absolute path of the plugin's own route; no trailing slash. */
+const ROUTE_PATH = '/polish/translate';
 
-/** The single endpoint on that channel. */
-const ENDPOINT_TRANSLATE = 'translate';
+/** Largest request body accepted, in bytes. */
+const MAX_BODY_BYTES = 64 * 1024;
 
 /** Lowercase command name without the leading slash. */
 const COMMAND_NAME = 'polish';
@@ -276,15 +283,14 @@ function failureOf(error, signal) {
 }
 
 /**
- * Serve one endpoint on the plugin's own RPC channel.
+ * Run one translation request and normalize the outcome into the result shape
+ * the Client reads.
  * @param ctx - Host plugin context.
- * @param endpoint - channel-relative endpoint name.
- * @param payload - channel-owned request payload.
- * @param signal - caller cancellation.
- * @returns the endpoint result.
+ * @param payload - request payload: `{ text, transcript, feedback }`.
+ * @param signal - cancellation for this request.
+ * @returns the result envelope.
  */
-async function handleRpc(ctx, endpoint, payload, signal) {
-	if (endpoint !== ENDPOINT_TRANSLATE) return failure('polish/unknown-endpoint', `未知端点：${endpoint}`);
+async function handleRequest(ctx, payload, signal) {
 	try {
 		return success(await translate(ctx, payload ?? {}, signal));
 	} catch (error) {
@@ -293,7 +299,88 @@ async function handleRpc(ctx, endpoint, payload, signal) {
 }
 
 /**
- * Register the `/polish` command and the translation channel.
+ * Write one JSON response.
+ * @param res - the Node response to own.
+ * @param status - HTTP status code.
+ * @param body - JSON-serializable body.
+ */
+function sendJson(res, status, body) {
+	const text = JSON.stringify(body);
+	res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+	res.end(text);
+}
+
+/**
+ * Read the whole request body, refusing anything oversized.
+ * @param req - the incoming request.
+ * @returns the body text, or undefined when it exceeded {@link MAX_BODY_BYTES}.
+ */
+async function readBody(req) {
+	let size = 0;
+	const chunks = [];
+	for await (const chunk of req) {
+		size += chunk.length;
+		if (size > MAX_BODY_BYTES) return undefined;
+		chunks.push(chunk);
+	}
+	return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * Serve one HTTP request on the plugin's own route.
+ *
+ * Authentication is the shipped predicate, not a hand-rolled one: the route is
+ * loopback-bound, but only a request that passes the Connection trust fence and
+ * the browser session check may spend a model call.
+ *
+ * @param ctx - Host plugin context.
+ * @param req - the incoming request.
+ * @param res - the response this handler owns.
+ */
+async function handleHttp(ctx, req, res) {
+	const rejection = ctx.connection.requestRejection({ headers: req.headers });
+	if (rejection !== undefined) {
+		res.writeHead(rejection);
+		res.end(rejection === 401 ? 'unauthorized' : 'forbidden');
+		return;
+	}
+	if (req.method !== 'POST') {
+		res.writeHead(405, { allow: 'POST' });
+		res.end('method not allowed');
+		return;
+	}
+
+	const controller = new AbortController();
+	let settled = false;
+	res.on('close', () => {
+		// A closed socket before the reply means the Client gave up (overlay
+		// dismissed, page unloaded): stop spending tokens on it.
+		if (!settled) controller.abort();
+	});
+
+	const body = await readBody(req);
+	if (body === undefined) {
+		settled = true;
+		sendJson(res, 413, failure('polish/bad-request', `请求体超过 ${MAX_BODY_BYTES} 字节`));
+		return;
+	}
+
+	let payload;
+	try {
+		payload = JSON.parse(body === '' ? '{}' : body);
+	} catch {
+		settled = true;
+		sendJson(res, 400, failure('polish/bad-request', '请求体不是合法 JSON'));
+		return;
+	}
+
+	const result = await handleRequest(ctx, payload, controller.signal);
+	settled = true;
+	sendJson(res, 200, result);
+}
+
+/**
+ * Register the `/polish` command and the plugin's own HTTP route.
  * @param ctx - Host plugin context.
  */
 export function apply(ctx) {
@@ -311,24 +398,13 @@ export function apply(ctx) {
 		'polish: /polish command',
 	);
 
-	ctx.effect(() => {
-		let disposed = false;
-		/** @type {(() => Promise<void>) | undefined} */
-		let release;
-		ctx.connection.rpc
-			.handle(CHANNEL, (endpoint, payload, signal) => handleRpc(ctx, endpoint, payload, signal))
-			.then(
-				(disposer) => {
-					if (disposed) void disposer();
-					else release = disposer;
-				},
-				(error) => {
-					console.error('[polish] failed to register the RPC channel:', error);
-				},
-			);
-		return () => {
-			disposed = true;
-			return release?.();
-		};
-	}, 'polish: rpc channel');
+	ctx.effect(
+		() =>
+			ctx.webServer.register({
+				kind: 'exact',
+				path: ROUTE_PATH,
+				handler: (req, res) => handleHttp(ctx, req, res),
+			}),
+		'polish: translate route',
+	);
 }

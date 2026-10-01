@@ -10,9 +10,9 @@
  * It never submits: `inputActions.submit` is deliberately never referenced, so
  * the user always presses send themselves.
  *
- * The translation itself runs on the Host over the plugin's own Connection RPC
- * channel, so no part of the user's text or the finished prompt is appended to
- * the session log.
+ * The translation itself runs on the Host behind the plugin's own route, so no
+ * part of the user's text or the finished prompt is appended to the session
+ * log.
  *
  * @module @local/dsh-polish/client
  */
@@ -23,10 +23,11 @@ window.__ModuleLoader__.load({
 		const React = require('react');
 		const h = React.createElement;
 
-		/** Absolute logical RPC channel owned by the Host half. */
-		const CHANNEL = '/polish';
-		/** The single endpoint on that channel. */
-		const ENDPOINT = 'translate';
+		/**
+		 * Host route owned by this plugin. Relative on purpose: it resolves
+		 * against the page exactly like the shipped `/api` channel does.
+		 */
+		const ROUTE = 'polish/translate';
 		/** Lowercase command name without the leading slash. */
 		const COMMAND = 'polish';
 		/** Clarification rounds allowed before the Host is told to settle. */
@@ -112,16 +113,27 @@ window.__ModuleLoader__.load({
 		 */
 		async function run(ctx, sessionId, state) {
 			try {
-				const result = await ctx.connection.rpc.call(
-					CHANNEL,
-					ENDPOINT,
-					{
+				const response = await fetch(ROUTE, {
+					method: 'POST',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify({
 						text: state.source,
 						transcript: state.transcript,
 						feedback: state.feedback ?? '',
-					},
-					state.controller.signal,
-				);
+					}),
+					signal: state.controller.signal,
+				});
+				if (!response.ok) {
+					if (readState(sessionId) !== state) return;
+					writeState(sessionId, {
+						...state,
+						phase: 'error',
+						code: 'polish/transport-error',
+						message: `转写接口返回 HTTP ${response.status}`,
+					});
+					return;
+				}
+				const result = await response.json();
 				if (readState(sessionId) !== state) return;
 				if (!result.ok) {
 					writeState(sessionId, { ...state, phase: 'error', code: result.error.code, message: result.error.message });
@@ -635,7 +647,8 @@ window.__ModuleLoader__.load({
 		}
 
 		return {
-			inject: ['slots', 'connection'],
+			// No `connection`: the Host call is a plain same-origin fetch.
+			inject: ['slots'],
 			apply,
 		};
 	},

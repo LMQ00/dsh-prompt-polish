@@ -74,12 +74,16 @@
 - 语言跟输入语言，术语保留英文。
 - JSON 解析失败 → 按 `polish/bad-output` 处理（见下），不把裸文本塞进输入框。
 
-## RPC 契约
+## HTTP 契约
 
-- 通道 `/polish`，端点 `translate`。
+- 路由：`POST /polish/translate`（`kind: 'exact'`，插件自己注册在 `webServer` 上）。
+- 认证：先过 `ctx.connection.requestRejection({ headers })`，不过则 401 / 403（响应体 `unauthorized` / `forbidden`）。**已实测**：无 cookie 的 POST 得到 401 `unauthorized`，未注册路径得到 404。
+- 请求体上限 64 KiB（`MAX_BODY_BYTES`）→ 超限 413；非 POST → 405；非 JSON → 400。
 - 请求：`{ text: string, transcript: [{ questions, answers }], feedback: string }`。
-- 成功：`{ kind:'questions', questions }` 或 `{ kind:'prompt', prompt, assumptions }`。
-- 失败：`{ code, message, details }`。
+- 成功（HTTP 200）：`{ ok: true, value: { kind:'questions', questions } | { kind:'prompt', prompt, assumptions } }`。
+- 业务失败（HTTP 200）：`{ ok: false, error: { code, message, details } }`。
+
+用 200 承载业务失败是刻意的：`ok` 字段已经区分成功/失败，HTTP 状态只表示传输层结果，Client 据此把两类失败分开报（HTTP 非 2xx → `polish/transport-error`）。
 
 ## 错误码
 
@@ -93,7 +97,7 @@
 | `polish/llm-error` | 模型报错、结束原因是 `error`/`max-tokens`/未知 | 模型给出的原因 | 是 |
 | `polish/timeout` | 超过 `TIMEOUT_MS` | 超过 60 秒仍未返回 | 是 |
 | `polish/aborted` | 调用方中止（关浮层、换会话） | 不显示（已静默关闭） | — |
-| `polish/transport-error` | Client 侧 HTTP/桥失败 | 传输错误原文 | 是 |
-| `polish/unknown-endpoint` | 端点名不对 | 未知端点 | — |
+| `polish/transport-error` | Client 侧 HTTP 非 2xx，或 fetch 本身失败 | 转写接口返回 HTTP xxx / 传输错误原文 | 是 |
+| `polish/bad-request` | 请求体不是 JSON，或超过 64 KiB | 请求体不是合法 JSON / 超过 64 KiB | — |
 
 所有错误都不清空用户已输入的粗糙文本。

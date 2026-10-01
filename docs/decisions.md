@@ -66,8 +66,10 @@
 
 | 决策 | 选择 | 理由 |
 | --- | --- | --- |
-| 调用桥 | Connection 通用 RPC：Host `rpc.handle('/polish', …)`，Client `rpc.call('/polish','translate',…)` | 唯一不需要代码生成的 Host↔Client 调用路径；走 HTTP，不落会话日志 |
-| Host `inject` | 含 `webServer` | `rpc.handle` 把物理路由挂在读取该服务的 Context 自己的 `webServer` 上，不 inject 直接抛错 |
+| 调用桥 | 插件自有 HTTP 路由：Host `ctx.webServer.register({kind:'exact', path:'/polish/translate'})`，Client 普通 `fetch` | 不需要代码生成；走 HTTP，不落会话日志；认证复用 `ctx.connection.requestRejection` |
+| Host `inject` | `['commands','llm','agentDefaultModel','connection','webServer']` | 路由挂在 `webServer`；`connection` 只用来取认证判定 |
+| 为什么不用 `ctx.connection.rpc.handle` | **实测不可用**：`handle` 把路由挂在 connection 服务自己的 ctx 上（`register(this.ctx, …)`），该 ctx 的 inject 只有 `credentials` + `webRuntime`，不含 `webServer`，任何调用方都撞 `cannot get property "webServer" without inject`；给本插件加 `webServer` 无效，因为 owner 不是本插件 | 上游问题，不是配置错误 |
+| 为什么不用 `rpc.intercept('/api', …)` | API Gateway 已占 `/api` 的唯一 interceptor，第二个注册直接抛错 | — |
 | `/polish` 命令的角色 | 只做「可见性 + 触发信号」：`recordInput: false`，handler 返回 `{kind:'success'}` 不带 text | 让命令记录行里既没有粗糙文本也没有规范提示词 |
 | 粗糙文本的来源 | Client 记下含 `/polish` 的最近一行草稿，`command/executed` 时取用 | 命令提交会清空草稿；这样不用把文本写进会话日志 |
 | 在途请求作废 | AbortController + 状态对象身份比较 | 比造请求 id 少一层状态 |
