@@ -626,7 +626,7 @@ window.__ModuleLoader__.load({
 							className: 'polish-block',
 							rows: 2,
 							value: sourceDraft,
-							placeholder: '写下你的粗糙请求，例如：帮我写个登录页',
+							placeholder: '输入你的需求',
 							onChange: (event) => setSourceDraft(event.target.value),
 						}),
 					);
