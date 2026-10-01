@@ -75,7 +75,8 @@
 | 粗糙文本的来源 | Client 记下含 `/polish` 的最近一行草稿，`command/executed` 时取用 | 命令提交会清空草稿；这样不用把文本写进会话日志 |
 | 在途请求作废 | AbortController + 状态对象身份比较 | 比造请求 id 少一层状态 |
 | v1 无 Config | 常量写死在 `index.js` | 见上 |
-| 追问上限改为**代码强制** | Client 在 `questions` 分支检查 `transcript.length >= MAX_ROUNDS`，超了报 `polish/round-limit` | 写自动化测试时发现原实现只靠提示词「请求」模型别问，模型不听话就会多出第 4 轮，与用户确认的「上限 3 轮」不符 |
+| 追问上限改为**代码强制** | Client 在 `questions` 分支检查 `rounds >= MAX_ROUNDS`，超了报 `polish/round-limit` | 写自动化测试时发现原实现只靠提示词「请求」模型别问，模型不听话就会多出第 4 轮，与用户确认的「上限 3 轮」不符 |
+| 追问**预算**与**记录**分离 | 新增 `rounds`；「不满意重试」归零、`transcript` 保留；出错重试两者都保留 | 用户指出的设计漏洞：第一版用 `transcript.length` 当预算，导致问满 3 轮后对出稿不满意也再没机会要求澄清。上限是为了拦模型无限盘问，不是拦用户 |
 | 自动化测试用 Node 内置 `node:test` | `npm test` = `node --test` | 项目零依赖零构建；jest/vitest 会为一个 bundle 包引入安装面与锁文件 |
 | Client 暴露 `__internals` 作为测试缝 | 工厂返回值多一个纯函数集合 | 浏览器模块加载器只交出工厂，状态机与序列化函数没有第二条可达路径；运行时不读该属性 |
 

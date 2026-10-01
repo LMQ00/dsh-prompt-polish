@@ -167,6 +167,7 @@ test('state machine: text in hand goes drafting, then review', async () => {
 			sessionId: SESSION,
 			text: '写个登录页',
 			transcript: [],
+			rounds: 0,
 			feedback: '',
 		});
 		await control.settle(0, { ok: true, value: { kind: 'prompt', prompt: 'P', assumptions: ['A'] } });
@@ -243,10 +244,11 @@ test('state machine: an error retry keeps the clarification rounds already earne
 		await control.settle(1, { ok: false, error: { code: 'polish/llm-error', message: 'boom' } });
 		assert.equal(internals.readState(SESSION).phase, 'error');
 
-		internals.translateWith({}, SESSION, 'x 改过', internals.readState(SESSION).transcript);
+		internals.translateWith({}, SESSION, 'x 改过', internals.readState(SESSION).transcript, internals.readState(SESSION).rounds);
 		const drafting = internals.readState(SESSION);
 		assert.equal(drafting.phase, 'drafting');
 		assert.equal(drafting.transcript.length, 1);
+		assert.equal(drafting.rounds, 1, 'an error must not hand back a fresh budget');
 		const body = JSON.parse(control.calls[2].init.body);
 		assert.equal(body.text, 'x 改过');
 		assert.equal(body.transcript.length, 1);
@@ -280,6 +282,51 @@ test('state machine: the clarification cap is enforced, not merely requested', a
 		const retried = internals.readState(SESSION);
 		assert.equal(retried.phase, 'drafting');
 		assert.equal(retried.transcript.length, internals.MAX_ROUNDS);
+	} finally {
+		control.restore();
+	}
+});
+
+test('state machine: rejecting an output reopens the clarification budget', async () => {
+	const control = createFetchControl();
+	try {
+		internals.start({}, SESSION, 'x');
+		for (let round = 0; round < internals.MAX_ROUNDS; round += 1) {
+			await control.settle(round, { ok: true, value: { kind: 'questions', questions: [{ id: 'q', text: 't' }] } });
+			internals.submitAnswers({}, SESSION, [`答${round}`]);
+		}
+		assert.equal(internals.readState(SESSION).rounds, internals.MAX_ROUNDS);
+
+		// The model settles, as the Host asked it to once the budget ran out.
+		await control.settle(internals.MAX_ROUNDS, { ok: true, value: { kind: 'prompt', prompt: 'P' } });
+		assert.equal(internals.readState(SESSION).phase, 'review');
+
+		// Rejecting that output starts a fresh attempt: the budget resets, while
+		// every answer already given stays in the transcript.
+		internals.retry({}, SESSION, '不对，再问几个问题');
+		const drafting = internals.readState(SESSION);
+		assert.equal(drafting.rounds, 0, 'a rejection must reopen the budget');
+		assert.equal(drafting.transcript.length, internals.MAX_ROUNDS);
+
+		// So the model is allowed to ask again instead of being stuck.
+		await control.settle(internals.MAX_ROUNDS + 1, {
+			ok: true,
+			value: { kind: 'questions', questions: [{ id: 'q', text: '再问一个' }] },
+		});
+		assert.equal(internals.readState(SESSION).phase, 'clarifying');
+	} finally {
+		control.restore();
+	}
+});
+
+test('state machine: the budget is reported to the Host on every request', async () => {
+	const control = createFetchControl();
+	try {
+		internals.start({}, SESSION, 'x');
+		assert.equal(JSON.parse(control.calls[0].init.body).rounds, 0);
+		await control.settle(0, { ok: true, value: { kind: 'questions', questions: [{ id: 'q', text: 't' }] } });
+		internals.submitAnswers({}, SESSION, ['答']);
+		assert.equal(JSON.parse(control.calls[1].init.body).rounds, 1);
 	} finally {
 		control.restore();
 	}

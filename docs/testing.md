@@ -52,6 +52,8 @@ Host 侧另测命令定义：`name`、`recordInput: false`、`input.hint`、hand
 | 不满意重试 | → `drafting`，feedback 进请求体，transcript 保留 |
 | 出错后重试 | → `drafting`，**已问到的澄清轮次不丢** |
 | 追问上限 | 第 3 轮之后模型仍追问 → `error` + `polish/round-limit`（**代码强制**） |
+| 预算与记录分离 | 「不满意重试」后 `rounds` 归零、`transcript` 保留，模型可再问；出错重试两者都保留 |
+| 预算上报 | 每次请求体都带 `rounds`；Host 依它决定是否写「问满轮次」指令，缺省回退 `transcript.length` |
 | 过期响应 | 旧请求后到 → 丢弃，不覆盖新状态 |
 | 放弃 | 中止在途请求（`AbortController.signal.aborted === true`）并回 `idle` |
 | 中止后 fetch 再 reject | 状态对象**身份不变**（不被改写成 error） |
@@ -111,7 +113,8 @@ Client：HTTP 非 2xx → `polish/transport-error`（带状态码）；业务失
 - **浮层的真实渲染、样式、深色主题未测**：没有浏览器控制，也不允许引入 DOM 模拟或自定义渲染器。这部分只能靠真实 GUI 人工看。
 - **「不落盘」是间接断言**（假 ctx 无 fs + 源码正则），没有运行期拦截。
 - **「切换会话丢弃在途请求」未直接测**：状态按 `sessionId` 分键，切会话只是读另一个键；已测等价性质「过期响应被丢弃」。
-- **Host 侧追问上限仍只是提示词请求**（`userPrompt` 在轮次满时告诉模型别再问）；硬拦截只在 Client。若模型在 Host 侧被其它入口直接调用，没有第二道闸。
+- **Host 侧追问上限仍只是提示词请求**（`userPrompt` 依据 Client 报来的 `rounds` 告诉模型别再问）；硬拦截只在 Client。若模型在 Host 侧被其它入口直接调用，没有第二道闸。
+- **预算只在内存**：`rounds` 不落盘，刷新页面后按 0 重算（与「不进会话历史」一致）。
 - **未测 HMR / 插件卸载路径**（样式表与槽位的回收）。
 
 ## 盲读测试（人工验收）

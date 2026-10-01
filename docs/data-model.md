@@ -23,7 +23,8 @@
 | --- | --- |
 | `state` | 上表枚举 |
 | `source` | 本次转写的粗糙文本（触发时快照，之后不被输入框编辑影响） |
-| `transcript` | 追问问答记录：`{ questions[], answers[] }[]`，重试时保留。**轮次不单独存**：`transcript.length` 就是已完成轮次 |
+| `transcript` | 追问问答记录：`{ questions[], answers[] }[]`，重试时保留（**这是记录，不是预算**） |
+| `rounds` | **本次尝试**已花掉的追问轮次，0..3。与 `transcript.length` 分开：记录只增不减，预算可在「不满意重试」时归零 |
 | `prompt` | 当前规范提示词（`review` 态） |
 | `assumptions` | 模型标注的假设（`review` 态） |
 | `questions` | 待回答的问题（`clarifying` 态） |
@@ -46,21 +47,24 @@
 | `idle` | 触发（无参数且草稿为空） | `input`（面板内可编辑文本框，不调模型） |
 | `input` | 点「转写」且文本非空 | `drafting`（`transcript` 为空） |
 | `input` | 点「关闭」 | `idle`（discarded） |
-| `drafting` | 模型要澄清且 `transcript.length < 3` | `clarifying` |
-| `drafting` | 模型要澄清但 `transcript.length >= 3` | `error` + `polish/round-limit`（**Client 侧硬拦截**） |
+| `drafting` | 模型要澄清且 `rounds < 3` | `clarifying`（`rounds + 1`） |
+| `drafting` | 模型要澄清但 `rounds >= 3` | `error` + `polish/round-limit`（**Client 侧硬拦截**） |
 | `drafting` | 模型给稿 | `review` |
 | `drafting` | 调用失败 | `error` |
 | `clarifying` | 用户回答并提交 | `drafting`（`transcript` 追加一轮） |
 | `clarifying` | 用户放弃 | `idle`（discarded） |
 | `review` | 采用 | `idle`（adopted）+ `setDraft(prompt)` |
-| `review` | 带反馈重试 | `drafting`（保留 `transcript`，附加 `feedback`） |
+| `review` | 带反馈重试 | `drafting`（保留 `transcript`，**`rounds` 归零**，附加 `feedback`） |
 | `review` | 放弃 | `idle`（discarded） |
-| `error` | 点「转写」（原文可改） | `drafting`（沿用 `transcript`，**保留已问到的澄清轮次**） |
+| `error` | 点「转写」（原文可改） | `drafting`（沿用 `transcript` 与 `rounds`，**保留已问到的澄清轮次与已花的预算**） |
 | `error` | 关闭 | `idle`（discarded） |
 
 ## 追问的硬约束
 
-- **上限 3 轮，代码强制**。Client 在收到 `questions` 时检查 `transcript.length >= MAX_ROUNDS`，超了就不进 `clarifying`，而是报 `polish/round-limit`（重试保留 transcript，Host 随即在提示词里要求模型直接出稿）。原先只靠 Host 提示词「请求」模型别再问，模型不听话就会多出一轮——这是写测试时发现的规格缺口，已修。
+- **上限 3 轮，按「尝试」计，代码强制**。Client 收到 `questions` 时检查 `rounds >= MAX_ROUNDS`，超了不进 `clarifying` 而报 `polish/round-limit`。
+- **「不满意重试」会把 `rounds` 归零**，`transcript` 保留。原因：上限是为了拦**模型**无限盘问，不是为了拦**用户**主动要求更多澄清。第一版把预算和记录混成 `transcript.length`，导致问满 3 轮后用户对出稿不满意、想让它再问也没机会了——这是用户指出的设计漏洞。
+- **出错重试不归零**：没有任何输出被否决，不该白送一轮预算。
+- **Host 侧用 Client 报上来的 `rounds`** 决定是否写「问满轮次，别再问」的指令；payload 没带 `rounds` 时回退到 `transcript.length`（兼容旧 Client）。
 - **有缺口才问**：模型自己判断信息是否足够；足够时首轮直接给稿，`clarifying` 不出现。
 - 追问形式：每个问题给 2–3 个选项，同时允许自由填；不强制选。
 

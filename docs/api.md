@@ -79,7 +79,8 @@
 - 路由：`POST /polish/translate`（`kind: 'exact'`，插件自己注册在 `webServer` 上）。
 - 认证：先过 `ctx.connection.requestRejection({ headers })`，不过则 401 / 403（响应体 `unauthorized` / `forbidden`）。**已实测**：无 cookie 的 POST 得到 401 `unauthorized`，未注册路径得到 404。
 - 请求体上限 64 KiB（`MAX_BODY_BYTES`）→ 超限 413；非 POST → 405；非 JSON → 400。
-- 请求：`{ sessionId?: string, text: string, transcript: [{ questions, answers }], feedback: string }`。
+- 请求：`{ sessionId?: string, text: string, transcript: [{ questions, answers }], rounds?: number, feedback: string }`。
+- `rounds` 是**本次尝试已花掉的追问轮次**，由 Client 报上来（Host 用它决定是否写「问满轮次，别再问」）。缺省时回退到 `transcript.length`。
 - `sessionId` 只用于**读**该会话最近的消息作为消歧上下文（见下）；缺失或读取失败一律降级为「无上下文」，不影响转写。
 - 成功（HTTP 200）：`{ ok: true, value: { kind:'questions', questions } | { kind:'prompt', prompt, assumptions } }`。
 - 业务失败（HTTP 200）：`{ ok: false, error: { code, message, details } }`。

@@ -217,6 +217,7 @@ window.__ModuleLoader__.load({
 						sessionId,
 						text: state.source,
 						transcript: state.transcript,
+						rounds: state.rounds ?? 0,
 						feedback: state.feedback ?? '',
 					}),
 					signal: state.controller.signal,
@@ -240,11 +241,10 @@ window.__ModuleLoader__.load({
 				const value = result.value;
 				if (value?.kind === 'questions') {
 					// The round cap is a product decision, so it is enforced here and
-					// not merely requested in the prompt: a model that keeps asking
-					// past the cap would otherwise silently add a fourth round. The
-					// retry button re-asks with the same transcript, which is exactly
-					// the state in which the Host tells the model to settle.
-					if (state.transcript.length >= MAX_ROUNDS) {
+					// not merely requested in the prompt. It counts the rounds spent by
+					// THIS attempt: rejecting an output resets the budget (see `retry`),
+					// so a user who wants more clarification can always get it.
+					if ((state.rounds ?? 0) >= MAX_ROUNDS) {
 						writeState(sessionId, {
 							...state,
 							phase: 'error',
@@ -253,7 +253,12 @@ window.__ModuleLoader__.load({
 						});
 						return;
 					}
-					writeState(sessionId, { ...state, phase: 'clarifying', questions: value.questions });
+					writeState(sessionId, {
+						...state,
+						phase: 'clarifying',
+						questions: value.questions,
+						rounds: (state.rounds ?? 0) + 1,
+					});
 				} else if (value?.kind === 'prompt') {
 					writeState(sessionId, {
 						...state,
@@ -286,14 +291,16 @@ window.__ModuleLoader__.load({
 		 * @param sessionId - the Session.
 		 * @param source - the rough text, already trimmed.
 		 * @param transcript - clarification rounds to carry into this attempt.
+		 * @param rounds - clarification rounds this attempt has already spent.
 		 */
-		function translateWith(ctx, sessionId, source, transcript) {
+		function translateWith(ctx, sessionId, source, transcript, rounds = 0) {
 			const previous = readState(sessionId);
 			if (previous.controller !== undefined) previous.controller.abort();
 			const state = {
 				phase: 'drafting',
 				source,
 				transcript: Array.isArray(transcript) ? transcript : [],
+				rounds: Number.isFinite(rounds) ? rounds : 0,
 				feedback: '',
 				controller: new AbortController(),
 			};
@@ -337,6 +344,8 @@ window.__ModuleLoader__.load({
 				phase: 'drafting',
 				source: state.source,
 				transcript,
+				// The budget was already charged when the questions were shown.
+				rounds: state.rounds ?? 0,
 				feedback: '',
 				controller: new AbortController(),
 			};
@@ -346,6 +355,13 @@ window.__ModuleLoader__.load({
 
 		/**
 		 * Ask for another draft, carrying the user's reason for rejecting the last one.
+		 *
+		 * Rejecting an output also opens a **fresh clarification budget**. The cap
+		 * exists to stop the model from interrogating forever; it must not stop the
+		 * user from asking again after an output missed the mark. The transcript is
+		 * still carried, so the model keeps every answer already given. An error
+		 * retry is different: nothing was rejected, so the budget stays spent.
+		 *
 		 * @param ctx - Client plugin context.
 		 * @param sessionId - the Session.
 		 * @param feedback - why the previous draft was rejected; may be empty for an error retry.
@@ -357,6 +373,7 @@ window.__ModuleLoader__.load({
 				phase: 'drafting',
 				source: state.source,
 				transcript: state.transcript ?? [],
+				rounds: state.phase === 'review' ? 0 : (state.rounds ?? 0),
 				feedback: typeof feedback === 'string' ? feedback.trim() : '',
 				controller: new AbortController(),
 			};
@@ -653,7 +670,7 @@ window.__ModuleLoader__.load({
 								disabled: sourceDraft.trim() === '',
 								// An error retry keeps the clarification rounds already earned;
 								// a first attempt from the input phase starts with none.
-								onClick: () => translateWith(ctx, sessionId, sourceDraft.trim(), state.transcript ?? []),
+								onClick: () => translateWith(ctx, sessionId, sourceDraft.trim(), state.transcript ?? [], state.rounds ?? 0),
 							}),
 							h(Action, { key: 'close', label: '关闭', onClick: () => dismiss(sessionId) }),
 						]),

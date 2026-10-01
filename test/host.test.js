@@ -391,6 +391,28 @@ test('prompt: an unanswered question renders as such, and the round cap is annou
 	assert.match(prompt, /已经问满澄清轮次/);
 });
 
+test('prompt: the settle instruction follows the Client budget, not the transcript length', async () => {
+	const threeRounds = [
+		{ questions: [{ id: 'q1', text: 't1' }], answers: ['a1'] },
+		{ questions: [{ id: 'q2', text: 't2' }], answers: ['a2'] },
+		{ questions: [{ id: 'q3', text: 't3' }], answers: ['a3'] },
+	];
+	const spent = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	await translate(spent, { text: 'x', rounds: 3, transcript: threeRounds });
+	assert.match(userText(spent), /已经问满澄清轮次/);
+
+	const legacy = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	await translate(legacy, { text: 'x', transcript: threeRounds });
+	assert.match(userText(legacy), /已经问满澄清轮次/, 'an absent budget falls back to the transcript length');
+
+	// The rejection path resets the budget while keeping every answer, so the
+	// model must be free to ask again instead of being told to settle.
+	const reopened = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	await translate(reopened, { text: 'x', rounds: 0, transcript: threeRounds });
+	assert.doesNotMatch(userText(reopened), /已经问满澄清轮次/);
+	assert.match(userText(reopened), /Q: t3/);
+});
+
 test('prompt: no context block when the Session is unknown', async () => {
 	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
 	await translate(host, { text: 'x' });

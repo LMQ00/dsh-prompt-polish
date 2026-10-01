@@ -202,7 +202,7 @@ async function recentContext(ctx, sessionId, signal) {
 
 /**
  * Render the user turn for one translation request.
- * @param request - rough text, clarification transcript, retry feedback, and read-only context.
+ * @param request - rough text, clarification transcript, retry feedback, read-only context, and the rounds this attempt has spent.
  * @returns the complete user message text.
  */
 function userPrompt(request) {
@@ -225,7 +225,12 @@ function userPrompt(request) {
 	if (typeof request.feedback === 'string' && request.feedback.trim() !== '') {
 		lines.push('', '用户对上一版不满意，原因：', request.feedback.trim());
 	}
-	if (transcript.length >= MAX_ROUNDS) {
+	// The Client owns the budget, because it is the side that knows whether the
+	// user rejected an output (which opens a fresh budget) or merely hit an
+	// error. Falling back to the transcript length keeps older Clients working.
+	const spentRounds =
+		typeof request.rounds === 'number' && Number.isFinite(request.rounds) ? request.rounds : transcript.length;
+	if (spentRounds >= MAX_ROUNDS) {
 		lines.push('', '已经问满澄清轮次：不要再返回 questions，直接给出规范提示词，把仍未确定的信息写进 assumptions。');
 	}
 	return lines.join('\n');
