@@ -1,0 +1,334 @@
+/**
+ * `/polish` — Host half.
+ *
+ * Turns a rough request into a规范 prompt through one direct `ctx.llm` call and
+ * returns the result over a Connection RPC channel. The Client half owns every
+ * piece of UI: the trigger button, the overlay above the composer, and the
+ * `setDraft` write.
+ *
+ * Boundaries this half must keep (see docs/decisions.md):
+ * - never touches `agentLoop` and never appends a session event, so nothing
+ *   about the user's text reaches the model's context;
+ * - never calls any filesystem write interface;
+ * - never sends anything: sending is the user's own action in the composer.
+ *
+ * The `/polish` command exists only so the command is discoverable in the
+ * composer's `/` menu and so the Client gets a reliable "the user asked for
+ * this" signal. It records no input (`recordInput: false`) and returns no text,
+ * so neither the rough text nor the finished prompt is written to the session
+ * log. The Client supplies the text it captured from the composer.
+ *
+ * @module @local/dsh-polish
+ */
+
+export const name = 'polish';
+
+/**
+ * All five Services exist in every composed Web profile. `commands` is what
+ * makes `/polish` discoverable, and `llm` plus `agentDefaultModel` are what
+ * make the translation possible at all.
+ *
+ * `webServer` is required by `connection.rpc.handle`: the channel registration
+ * mounts its physical route on the reading context's own `webServer`, so this
+ * plugin must inject it or the registration refuses.
+ */
+export const inject = ['commands', 'llm', 'agentDefaultModel', 'connection', 'webServer'];
+
+/** Absolute logical RPC channel owned by this plugin. */
+const CHANNEL = '/polish';
+
+/** The single endpoint on that channel. */
+const ENDPOINT_TRANSLATE = 'translate';
+
+/** Lowercase command name without the leading slash. */
+const COMMAND_NAME = 'polish';
+
+/**
+ * Clarification rounds the Client may run before it must settle for a draft.
+ * Kept in step with the Client's own cap: the Host also refuses to ask again
+ * once the transcript is this long, so a stale Client cannot loop forever.
+ */
+const MAX_ROUNDS = 3;
+
+/** Wall-clock cap for one model call. */
+const TIMEOUT_MS = 60_000;
+
+/** Output cap; a规范 prompt plus its assumptions fits comfortably. */
+const MAX_OUTPUT_TOKENS = 4_096;
+
+/** Translation instructions. Code-owned: this plugin declares no Config. */
+const SYSTEM_PROMPT = `你是一个提示词转写器。用户会给你一段粗糙的请求，你把它转写成一段规范提示词，目标是让一个**没有任何上下文**的模型也能准确理解用户意图。
+
+只输出一个 JSON 对象，不要输出任何解释、前言或代码围栏。
+
+二选一：
+
+1) 信息不足，需要澄清：
+{"kind":"questions","questions":[{"id":"q1","text":"问题","options":["选项一","选项二"],"multi":false}]}
+最多 3 个问题。每个问题给 2-3 个选项，用户也可以自由作答。只问那些**会实质改变结果**的信息。
+
+2) 信息足够，给出规范提示词：
+{"kind":"prompt","prompt":"<规范提示词全文>","assumptions":["<仍未确定、由你假设的信息>"]}
+
+规范提示词必须覆盖：
+- 任务与目标：要什么结果、做什么、不做什么；
+- 输出格式与验收标准：交付成什么形式、怎么算完成；
+- 缺口显式标注：原始描述没提但影响结果的信息，必须标出来；
+- 不得发明需求：不要添加用户没有表达的需求；无法确定的一律写进 assumptions。
+
+其它要求：
+- 用与输入相同的语言书写，专业术语保留英文。
+- 规范提示词必须能独立成立：不出现「如上」「刚才说的」这类依赖上下文的指代。
+- 不要把用户的粗糙原话原样复述一遍当作转写结果。`;
+
+/**
+ * One settled model outcome, normalized for the Client.
+ * @typedef {{ kind: 'questions', questions: unknown[] }
+ *   | { kind: 'prompt', prompt: string, assumptions: string[] }} TranslationValue
+ */
+
+/**
+ * Build one RPC failure in the shape Connection expects.
+ * @param code - stable machine code the Client maps to display copy.
+ * @param message - human-readable reason.
+ * @returns the failure result.
+ */
+function failure(code, message) {
+	return { ok: false, error: { code, message, details: {} } };
+}
+
+/**
+ * Build one RPC success.
+ * @param value - JSON-serializable payload.
+ * @returns the success result.
+ */
+function success(value) {
+	return { ok: true, value };
+}
+
+/**
+ * Render the user turn for one translation request.
+ * @param request - rough text, clarification transcript, and retry feedback.
+ * @returns the complete user message text.
+ */
+function userPrompt(request) {
+	const lines = ['原始请求：', request.text];
+	const transcript = Array.isArray(request.transcript) ? request.transcript : [];
+	for (const round of transcript) {
+		lines.push('', '已经问过并得到回答的澄清：');
+		const questions = Array.isArray(round?.questions) ? round.questions : [];
+		const answers = Array.isArray(round?.answers) ? round.answers : [];
+		questions.forEach((question, index) => {
+			const text = typeof question?.text === 'string' ? question.text : String(question?.id ?? '');
+			lines.push(`Q: ${text}`);
+			lines.push(`A: ${String(answers[index] ?? '（未回答）')}`);
+		});
+	}
+	if (typeof request.feedback === 'string' && request.feedback.trim() !== '') {
+		lines.push('', '用户对上一版不满意，原因：', request.feedback.trim());
+	}
+	if (transcript.length >= MAX_ROUNDS) {
+		lines.push('', '已经问满澄清轮次：不要再返回 questions，直接给出规范提示词，把仍未确定的信息写进 assumptions。');
+	}
+	return lines.join('\n');
+}
+
+/**
+ * Strip a code fence and any surrounding prose, then parse the first JSON object.
+ * @param text - raw model text.
+ * @returns the parsed value.
+ * @throws {Error} with a `code` when no JSON object can be parsed.
+ */
+function parseModelJson(text) {
+	const withoutFence = text.replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+	const start = withoutFence.indexOf('{');
+	const end = withoutFence.lastIndexOf('}');
+	if (start === -1 || end <= start) {
+		const error = new Error('模型没有返回 JSON 对象');
+		error.code = 'polish/bad-output';
+		throw error;
+	}
+	try {
+		return JSON.parse(withoutFence.slice(start, end + 1));
+	} catch (cause) {
+		const error = new Error('模型返回的 JSON 无法解析');
+		error.code = 'polish/bad-output';
+		error.cause = cause;
+		throw error;
+	}
+}
+
+/**
+ * Normalize one parsed model value, or throw when it is not a usable shape.
+ * @param value - parsed JSON from the model.
+ * @returns the translation value the Client renders.
+ */
+function normalizeModelValue(value) {
+	if (value !== null && typeof value === 'object' && value.kind === 'questions') {
+		const questions = Array.isArray(value.questions) ? value.questions : [];
+		if (questions.length === 0) {
+			const error = new Error('模型要求澄清，却没有给出问题');
+			error.code = 'polish/bad-output';
+			throw error;
+		}
+		return { kind: 'questions', questions: questions.slice(0, MAX_ROUNDS) };
+	}
+	if (value !== null && typeof value === 'object' && value.kind === 'prompt') {
+		const prompt = typeof value.prompt === 'string' ? value.prompt.trim() : '';
+		if (prompt === '') {
+			const error = new Error('模型返回了空的规范提示词');
+			error.code = 'polish/bad-output';
+			throw error;
+		}
+		const assumptions = Array.isArray(value.assumptions)
+			? value.assumptions.filter((item) => typeof item === 'string' && item.trim() !== '')
+			: [];
+		return { kind: 'prompt', prompt, assumptions };
+	}
+	const error = new Error('模型返回了无法识别的结构');
+	error.code = 'polish/bad-output';
+	throw error;
+}
+
+/**
+ * Run one translation call against the shared LLM service.
+ *
+ * Nothing here is session-scoped: the request carries no `sessionId` and no
+ * `purpose`, so the call cannot land in any session's history.
+ *
+ * @param ctx - Host plugin context carrying `llm` and `agentDefaultModel`.
+ * @param request - rough text plus optional transcript and feedback.
+ * @param signal - caller cancellation from the RPC invocation.
+ * @returns the translation value.
+ */
+async function translate(ctx, request, signal) {
+	const text = typeof request?.text === 'string' ? request.text.trim() : '';
+	if (text === '') {
+		const error = new Error('先写点东西再触发转写');
+		error.code = 'polish/empty-input';
+		throw error;
+	}
+
+	const selection = ctx.agentDefaultModel.currentSelection();
+	const provider = selection?.provider;
+	const model = selection?.model;
+	if (typeof provider !== 'string' || provider === '' || typeof model !== 'string' || model === '') {
+		const error = new Error('当前没有可用的默认模型，请先在设置里选一个模型');
+		error.code = 'polish/no-model';
+		throw error;
+	}
+
+	const deadline = AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]);
+	const messages = [{ role: 'user', content: [{ type: 'text', text: userPrompt({ ...request, text }) }] }];
+
+	let output = '';
+	let finish;
+	for await (const chunk of ctx.llm.stream({
+		provider,
+		model,
+		messages,
+		system: SYSTEM_PROMPT,
+		maxTokens: MAX_OUTPUT_TOKENS,
+		signal: deadline,
+	})) {
+		if (chunk.type === 'text-delta') output += chunk.text;
+		else if (chunk.type === 'finish') finish = chunk.reason;
+	}
+
+	if (finish === undefined) {
+		const error = new Error('模型调用没有返回结束标记');
+		error.code = 'polish/llm-error';
+		throw error;
+	}
+	if (finish.kind === 'error' || finish.kind === 'aborted') {
+		const error = new Error(finish.failure?.message ?? '模型调用失败');
+		error.code = 'polish/llm-error';
+		throw error;
+	}
+	if (finish.kind === 'max-tokens') {
+		const error = new Error('模型输出被 maxTokens 截断');
+		error.code = 'polish/llm-error';
+		throw error;
+	}
+	if (finish.kind !== 'stop') {
+		const error = new Error(`未知的结束原因：${String(finish.kind)}`);
+		error.code = 'polish/llm-error';
+		throw error;
+	}
+
+	return normalizeModelValue(parseModelJson(output));
+}
+
+/**
+ * Map one thrown value to the RPC failure the Client displays.
+ * @param error - the thrown value.
+ * @param signal - the caller's own signal, to tell cancellation from timeout.
+ * @returns the failure result.
+ */
+function failureOf(error, signal) {
+	if (signal.aborted) return failure('polish/aborted', '已取消');
+	const code = typeof error?.code === 'string' && error.code !== '' ? error.code : 'polish/llm-error';
+	const message = error instanceof Error ? error.message : String(error);
+	if (code === 'polish/llm-error' && error?.name === 'TimeoutError') {
+		return failure('polish/timeout', `超过 ${TIMEOUT_MS / 1000} 秒仍未返回`);
+	}
+	return failure(code, message);
+}
+
+/**
+ * Serve one endpoint on the plugin's own RPC channel.
+ * @param ctx - Host plugin context.
+ * @param endpoint - channel-relative endpoint name.
+ * @param payload - channel-owned request payload.
+ * @param signal - caller cancellation.
+ * @returns the endpoint result.
+ */
+async function handleRpc(ctx, endpoint, payload, signal) {
+	if (endpoint !== ENDPOINT_TRANSLATE) return failure('polish/unknown-endpoint', `未知端点：${endpoint}`);
+	try {
+		return success(await translate(ctx, payload ?? {}, signal));
+	} catch (error) {
+		return failureOf(error, signal);
+	}
+}
+
+/**
+ * Register the `/polish` command and the translation channel.
+ * @param ctx - Host plugin context.
+ */
+export function apply(ctx) {
+	ctx.effect(
+		() =>
+			ctx.commands.register({
+				name: COMMAND_NAME,
+				description: '把粗糙提示词转写成规范提示词，确认后写入输入框',
+				input: { hint: '粗糙提示词（留空则用输入框当前内容）' },
+				// The rough text must not reach the session log; the Client holds it.
+				recordInput: false,
+				// Discovery signal only: the Client owns the text, the overlay, and the write.
+				handler: () => ({ kind: 'success' }),
+			}),
+		'polish: /polish command',
+	);
+
+	ctx.effect(() => {
+		let disposed = false;
+		/** @type {(() => Promise<void>) | undefined} */
+		let release;
+		ctx.connection.rpc
+			.handle(CHANNEL, (endpoint, payload, signal) => handleRpc(ctx, endpoint, payload, signal))
+			.then(
+				(disposer) => {
+					if (disposed) void disposer();
+					else release = disposer;
+				},
+				(error) => {
+					console.error('[polish] failed to register the RPC channel:', error);
+				},
+			);
+		return () => {
+			disposed = true;
+			return release?.();
+		};
+	}, 'polish: rpc channel');
+}

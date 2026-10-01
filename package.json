@@ -1,0 +1,29 @@
+{
+  "name": "@local/dsh-polish",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "把粗糙提示词转写成规范提示词，确认后写入输入框。",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}

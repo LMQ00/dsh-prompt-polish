@@ -57,8 +57,24 @@
 | 保留生成历史 | 与「不进会话历史」冲突，且增加存储面 |
 | 包目录放 `packages/polish/` | 用户否决：源码放仓库根目录 |
 | 把产品边界写成 AGENTS.md 规则 | 用户裁决：AGENTS.md 只放开发规范规则，产品特性归 docs/ |
+| 调用桥用 `ctx.remote.commands.execute` 执行 `/polish`，拿命令结果回传 | 命令结果会进 `command/done`，等于把规范提示词写进会话日志，违反产品边界；且命令 handler 跑在 Host，拿不到输入框 |
+| 调用桥用 Typert 生成的 `ctx.remote.*` 命名空间 | 需要生成产物与构建步骤；本仓库是普通 JS、无构建 |
+| 浮层可编辑 | 用户选定只读；重试必须带反馈 |
+| v1 就声明 Config | 声明 Config 要 import schema 库；workspace 包的模块解析路径与 profile 安装包不同，先保证能加载，Config 延后 |
+
+## 已实现的决策（第 1 轮开发）
+
+| 决策 | 选择 | 理由 |
+| --- | --- | --- |
+| 调用桥 | Connection 通用 RPC：Host `rpc.handle('/polish', …)`，Client `rpc.call('/polish','translate',…)` | 唯一不需要代码生成的 Host↔Client 调用路径；走 HTTP，不落会话日志 |
+| Host `inject` | 含 `webServer` | `rpc.handle` 把物理路由挂在读取该服务的 Context 自己的 `webServer` 上，不 inject 直接抛错 |
+| `/polish` 命令的角色 | 只做「可见性 + 触发信号」：`recordInput: false`，handler 返回 `{kind:'success'}` 不带 text | 让命令记录行里既没有粗糙文本也没有规范提示词 |
+| 粗糙文本的来源 | Client 记下含 `/polish` 的最近一行草稿，`command/executed` 时取用 | 命令提交会清空草稿；这样不用把文本写进会话日志 |
+| 在途请求作废 | AbortController + 状态对象身份比较 | 比造请求 id 少一层状态 |
+| v1 无 Config | 常量写死在 `index.js` | 见上 |
 
 ## 已知未决/风险
 
-- `/polish` 会在对话流留下一条命令记录行（DSH 命令机制固有，log-only、模型不可见）。若实测不可接受，退路是只保留按钮入口。详见 [api.md](api.md)。
-- 调用桥的具体形式尚未定，实现时按 `references/user-actions.md` 选型后回写 [architecture.md](architecture.md)。
+- `/polish` 会在对话流留下一条命令记录行（DSH 命令机制固有，log-only、模型不可见）。已压到无 `args`、无结果 `text`。若实测仍不可接受，退路是只保留按钮入口。详见 [api.md](api.md)。
+- 改 Host 半边（`index.js`）后，**必须重启 dsh 才能生效**：Host 模块被 ESM 缓存，`set_plugin` 关开一次也只会复用旧模块。Client 半边（`client.js`）不受此限。
+- Config 延后：待确认 workspace 包能否 bare import `@deepseek-ai/schemastery`。
