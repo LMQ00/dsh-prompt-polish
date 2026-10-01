@@ -47,7 +47,7 @@
 | `input` | 点「转写」且文本非空 | `drafting`（`transcript` 为空） |
 | `input` | 点「关闭」 | `idle`（discarded） |
 | `drafting` | 模型要澄清且 `transcript.length < 3` | `clarifying` |
-| `drafting` | 模型要澄清且已达上限 | `review`（直接出稿，稿内显式标注假设；实际由 Host 提示词强制） |
+| `drafting` | 模型要澄清但 `transcript.length >= 3` | `error` + `polish/round-limit`（**Client 侧硬拦截**） |
 | `drafting` | 模型给稿 | `review` |
 | `drafting` | 调用失败 | `error` |
 | `clarifying` | 用户回答并提交 | `drafting`（`transcript` 追加一轮） |
@@ -60,9 +60,9 @@
 
 ## 追问的硬约束
 
-- **上限 3 轮**。第 3 轮回答后无论是否仍有缺口，一律直接出稿，并在稿的「假设与缺口」段显式标注仍未确定的信息。
+- **上限 3 轮，代码强制**。Client 在收到 `questions` 时检查 `transcript.length >= MAX_ROUNDS`，超了就不进 `clarifying`，而是报 `polish/round-limit`（重试保留 transcript，Host 随即在提示词里要求模型直接出稿）。原先只靠 Host 提示词「请求」模型别再问，模型不听话就会多出一轮——这是写测试时发现的规格缺口，已修。
 - **有缺口才问**：模型自己判断信息是否足够；足够时首轮直接给稿，`clarifying` 不出现。
-- 追问形式：每个问题给 2–3 个选项按钮（可多选），同时允许自由填；不强制选。
+- 追问形式：每个问题给 2–3 个选项，同时允许自由填；不强制选。
 
 ## 竞态与边界
 

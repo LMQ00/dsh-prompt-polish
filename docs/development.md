@@ -38,6 +38,14 @@ plugin_manager action=install_bundle target=/home/LMQ/github/提示词
 
 只跑通安装不算验证完成。
 
+## 测试
+
+```
+npm test          # = node --test，自动发现 test/*.test.js
+```
+
+零依赖，用的是 Node 内置 `node:test`。改任何行为前后都跑一遍；行为改动必须补测试（规则 D4）。覆盖范围与已知缺口见 [testing.md](testing.md)。
+
 ## 调试
 
 - 浏览器控制台看 Client 半边报错。

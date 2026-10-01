@@ -25,7 +25,7 @@
 | D1 | 临时文件只放 `tmp/`，不污染仓库其他目录 | 提示词 |
 | D2 | 改代码前判断本次改动是否让 `docs/*.md` 或本文件过时；过时文档比没有文档更坏；判断不了时在回答末尾列出「可能已过时」清单 | 提示词 |
 | D3 | 插件代码改完必须 `install_bundle` 并在**真实 GUI** 上验证，不能只看安装结果的 `application` 字段或日志 | 提示词 |
-| D4 | 行为改动必须补对应自动化测试；盲读测试是人工验收，不进 CI | 提示词 |
+| D4 | 行为改动必须补对应自动化测试，并跑通 `npm test`（Node 内置 `node:test`，零依赖）；盲读测试是人工验收，不进 CI | 提示词 |
 | D5 | 不建占位文档/占位文件：写不出真实内容的类型不建文件 | 提示词 |
 | D6 | 源码放仓库**根目录**（`package.json` / `cordis.patch.yml` / `index.js` / `client.js`），不建 `packages/` 子目录 | 提示词 |
 | D7 | 每完成一个业务就 commit，不必等用户开口；以 dsh 身份提交：`git commit --author="dsh <dsh@local>" --no-gpg-sign -m "<类型>: <文案>"`，类型取 `feat`/`fix`/`chore`/`docs`/`refactor` | 提示词 |

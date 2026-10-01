@@ -112,5 +112,6 @@
 | `polish/aborted` | 调用方中止（关浮层、换会话） | 不显示（已静默关闭） | — |
 | `polish/transport-error` | Client 侧 HTTP 非 2xx，或 fetch 本身失败 | 转写接口返回 HTTP xxx / 传输错误原文 | 是 |
 | `polish/bad-request` | 请求体不是 JSON，或超过 64 KiB | 请求体不是合法 JSON / 超过 64 KiB | — |
+| `polish/round-limit` | 已问满 `MAX_ROUNDS` 轮，模型仍返回 `questions`（**Client 侧硬拦截**） | 已经问满 3 轮澄清，模型仍在追问。重试会让它直接出稿。 | 是（重试保留 transcript，Host 随即要求模型直接出稿） |
 
 所有错误都不清空用户已输入的粗糙文本。

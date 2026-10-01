@@ -63,18 +63,21 @@
 | 浮层可编辑 | 用户选定只读；重试必须带反馈 |
 | v1 就声明 Config | 声明 Config 要 import schema 库；workspace 包的模块解析路径与 profile 安装包不同，先保证能加载，Config 延后 |
 
-## 已实现的决策（第 1 轮开发）
+## 已实现的决策
 
 | 决策 | 选择 | 理由 |
 | --- | --- | --- |
 | 调用桥 | 插件自有 HTTP 路由：Host `ctx.webServer.register({kind:'exact', path:'/polish/translate'})`，Client 普通 `fetch` | 不需要代码生成；走 HTTP，不落会话日志；认证复用 `ctx.connection.requestRejection` |
-| Host `inject` | `['commands','llm','agentDefaultModel','connection','webServer']` | 路由挂在 `webServer`；`connection` 只用来取认证判定 |
+| Host `inject` | `['commands','llm','agentDefaultModel','connection','webServer','sessionQuery']` | 路由挂在 `webServer`；`connection` 只用来取认证判定；`sessionQuery` 只读上下文 |
 | 为什么不用 `ctx.connection.rpc.handle` | **实测不可用**：`handle` 把路由挂在 connection 服务自己的 ctx 上（`register(this.ctx, …)`），该 ctx 的 inject 只有 `credentials` + `webRuntime`，不含 `webServer`，任何调用方都撞 `cannot get property "webServer" without inject`；给本插件加 `webServer` 无效，因为 owner 不是本插件 | 上游问题，不是配置错误 |
 | 为什么不用 `rpc.intercept('/api', …)` | API Gateway 已占 `/api` 的唯一 interceptor，第二个注册直接抛错 | — |
 | `/polish` 命令的角色 | 只做「可见性 + 触发信号」：`recordInput: false`，handler 返回 `{kind:'success'}` 不带 text | 让命令记录行里既没有粗糙文本也没有规范提示词 |
 | 粗糙文本的来源 | Client 记下含 `/polish` 的最近一行草稿，`command/executed` 时取用 | 命令提交会清空草稿；这样不用把文本写进会话日志 |
 | 在途请求作废 | AbortController + 状态对象身份比较 | 比造请求 id 少一层状态 |
 | v1 无 Config | 常量写死在 `index.js` | 见上 |
+| 追问上限改为**代码强制** | Client 在 `questions` 分支检查 `transcript.length >= MAX_ROUNDS`，超了报 `polish/round-limit` | 写自动化测试时发现原实现只靠提示词「请求」模型别问，模型不听话就会多出第 4 轮，与用户确认的「上限 3 轮」不符 |
+| 自动化测试用 Node 内置 `node:test` | `npm test` = `node --test` | 项目零依赖零构建；jest/vitest 会为一个 bundle 包引入安装面与锁文件 |
+| Client 暴露 `__internals` 作为测试缝 | 工厂返回值多一个纯函数集合 | 浏览器模块加载器只交出工厂，状态机与序列化函数没有第二条可达路径；运行时不读该属性 |
 
 ## 已知未决/风险
 

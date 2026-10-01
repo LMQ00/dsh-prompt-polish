@@ -239,6 +239,20 @@ window.__ModuleLoader__.load({
 				}
 				const value = result.value;
 				if (value?.kind === 'questions') {
+					// The round cap is a product decision, so it is enforced here and
+					// not merely requested in the prompt: a model that keeps asking
+					// past the cap would otherwise silently add a fourth round. The
+					// retry button re-asks with the same transcript, which is exactly
+					// the state in which the Host tells the model to settle.
+					if (state.transcript.length >= MAX_ROUNDS) {
+						writeState(sessionId, {
+							...state,
+							phase: 'error',
+							code: 'polish/round-limit',
+							message: `已经问满 ${MAX_ROUNDS} 轮澄清，模型仍在追问。重试会让它直接出稿。`,
+						});
+						return;
+					}
 					writeState(sessionId, { ...state, phase: 'clarifying', questions: value.questions });
 				} else if (value?.kind === 'prompt') {
 					writeState(sessionId, {
@@ -706,6 +720,30 @@ window.__ModuleLoader__.load({
 			// No `connection`: the Host call is a plain same-origin fetch.
 			inject: ['slots'],
 			apply,
+			// Test seam. The browser module loader hands out only this factory, so
+			// the pure state machine and the serialization helpers have no other
+			// way to be reached from `test/client.test.js`. Nothing in the running
+			// app reads this property.
+			__internals: {
+				ROUTE,
+				COMMAND,
+				MAX_ROUNDS,
+				IDLE,
+				EMPTY_ANSWER,
+				readState,
+				writeState,
+				subscribe,
+				stripCommand,
+				isMulti,
+				serializeAnswer,
+				run,
+				start,
+				translateWith,
+				submitAnswers,
+				retry,
+				dismiss,
+				adopt,
+			},
 		};
 	},
 });
