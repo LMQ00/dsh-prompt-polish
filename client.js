@@ -53,7 +53,7 @@ window.__ModuleLoader__.load({
 		 * content column so it reads as part of the composer, not a page.
 		 */
 		const CSS = `
-.polish-panel{display:flex;flex-direction:column;gap:6px;width:100%;max-width:var(--dsh-chat-content-width,748px);max-height:45vh;overflow-y:auto;margin:0 auto 6px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg,8px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}
+.polish-panel{display:flex;flex-direction:column;gap:6px;flex:0 0 auto;width:100%;max-width:var(--dsh-chat-content-width,748px);max-height:45vh;overflow-y:auto;margin:0 auto 6px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-lg,8px);background:var(--dsw-specific-input-major,var(--dsw-alias-bg-layer-1));color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}
 .polish-panel *{box-sizing:border-box}
 .polish-head{display:flex;align-items:center;justify-content:space-between;gap:6px;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
 .polish-x{width:20px;height:20px;padding:0;border:0;border-radius:999px;background:0 0;color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));cursor:pointer;display:grid;place-items:center;font-size:11px}

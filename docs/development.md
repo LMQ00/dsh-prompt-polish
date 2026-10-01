@@ -55,3 +55,4 @@ plugin_manager action=install_bundle target=/home/LMQ/github/提示词
 | 改动看不到 | Client 半边没 HMR，页面没刷新 |
 | 按钮闪烁 / 悬停态看起来粘住 | 样式表被当成 React 元素渲染：render 阶段的 `document.querySelector` 守卫会在「有→无→有」之间翻转，输入框每敲一个字都重渲染按钮，整套样式就被反复摘掉挂回。**命令式注入一次**（`apply` 里 `document.createElement('style')` + `ctx.effect` 回收），不要用 React 元素 |
 | 输入框里打字打不进去 | 用 effect 重置表单草稿会和击键竞争；改成 render 阶段比较签名再重置（React 官方的「prop 变了就调整 state」写法） |
+| 浮层在**空白新会话**里被压扁（旧会话正常） | 新会话的 composer 是 hero 变体：`composerStack` 是列向 flex 且高度受限，`conversation.input.dock` 的默认 `flex-shrink:1` 会把面板压到只剩标题。给面板加 `flex:0 0 auto` |
