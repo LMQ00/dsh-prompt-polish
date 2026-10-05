@@ -1,6 +1,6 @@
 {
   "name": "dsh-prompt-polish",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "把粗糙提示词转写成规范提示词，确认后写入输入框。",
   "license": "MIT",
