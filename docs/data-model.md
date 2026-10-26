@@ -28,8 +28,13 @@
 | `prompt` | 当前规范提示词（`review` 态） |
 | `assumptions` | 模型标注的假设（`review` 态） |
 | `questions` | 待回答的问题（`clarifying` 态） |
+| `imageFiles` | 触发那一刻从输入框抓到的图片 `File` 句柄，`input`/`drafting`/`clarifying`/`review`/`error` 全程携带；澄清下一轮与重试都复用同一批，不重新采集 |
 | `error` | `{ code, message }`（`error` 态） |
 | `controller` | 该次请求的 `AbortController`；响应回来时若 store 里已不是发起时那个状态对象，直接丢弃 |
+
+`imageFiles` 存的是 `File` 而不是 base64：编码只在每次发请求前做一次（`encodeImageFiles`），避免把几百 KB 到几 MB 的字符串常驻在状态里，也避免重试时拿旧编码。纯文本路径**不做任何编码、不加 `await`**，因此普通转写的时序没有变化。
+
+图片在输入框里被删掉不会影响已打开浮层：快照就是「触发那一刻用户想转写的东西」。
 
 ### 浮层内的回答草稿（纯 UI 状态，不进 store）
 

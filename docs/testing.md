@@ -1,6 +1,6 @@
 # 测试
 
-> 状态：**自动化测试已实现并全绿**（62 项）。盲读测试仍未执行。
+> 状态：**自动化测试已实现并全绿**（82 项）。盲读测试仍未执行。
 
 ## 框架与运行
 
@@ -36,7 +36,7 @@ Host 半边不需要缝：`test/host.test.js` 用假 ctx 调 `apply(ctx)`，然�
 | 出现两次 | 只剥第一个 |
 | 非字符串输入 | 返回空串 |
 
-Host 侧另测命令定义：`name`、`recordInput: false`、`input.hint`、handler 返回 `{kind:'success'}` 且 **`text` 为 undefined**（保证规范版不进会话日志）。
+Host 侧另测命令定义：`name`、`recordInput: false`、`input.hint`、`input.attachments === true`（带图提交能过 composer 闸门）、handler 返回 `{kind:'success'}` 且 **`text` 为 undefined**（保证规范版不进会话日志）。
 
 ### 2. 状态机迁移
 
@@ -95,7 +95,42 @@ Client：HTTP 非 2xx → `polish/transport-error`（带状态码）；业务失
 - **HTTP 契约**：401/403 拒绝（且不调模型）、非 POST 405、超限 413、非 JSON 400、空 body 等价空 payload、成功时 content-type 正确。
 - **提示词组装**：粗糙文本、四硬清单四项、语言约束、Q/A 渲染、未回答渲染、问满轮次的指令。
 - **上下文读取**：只取 user/assistant 的 text 块（忽略 image 与 tool 事件）、观察租约被释放、尾部 8 条、超长从头截断、读取失败降级为无上下文、无 `sessionId` 时不发起读取、**模型调用不带 `sessionId`/`purpose`**。
-- **边界**：假 ctx 只提供被注入的六个 Service + `effect`，完整请求仍成功（触及 `agentLoop`/fs 就会失败）；源码不得出现 fs 写接口。
+- **边界**：假 ctx 只提供被注入的七个 Service + `effect`，完整请求仍成功（触及 `agentLoop`/fs 就会失败）；源码不得出现 fs 写接口。
+
+### 图片通路
+
+Host 侧（10 项）：
+
+| 用例 | 断言 |
+| --- | --- |
+| 带图请求 | 图片经 `admitPromptContent` 准入；消息内容**文本在前、图片在后**，图片带 `attachment` 引用 |
+| 纯文本请求 | 完全不碰附件服务，内容只有 text 块 |
+| 畸形图片项 | 未知 MIME / 空 data / null / 非对象被丢弃，转写仍成功，只准入合法那张 |
+| 模型不支持图片 | 声明 `inputModalities: ['text']` → `polish/no-vision`，不调模型、不准入 |
+| 模型未声明模态 | 视为支持，正常发图（不因字段缺失制造硬错误） |
+| 能力查询失败 | 不吞掉用户的图，继续请求（让适配器给权威拒绝） |
+| 准入被拒 | 保留附件服务原文，code 为 `polish/bad-image`，不调模型 |
+| 两档 body 上限 | 无图 70 KB → 413；带图超过 64 KB → 200 |
+
+Client 侧（10 项）：
+
+| 用例 | 断言 |
+| --- | --- |
+| 收集范围 | 只取 `kind:'image'` 且 MIME 在白名单内的草稿，保持 rail 顺序 |
+| 编码 | `{ mediaType, data }`；无名文件不发送空 `name` |
+| 触发即带图 | 首个请求体含 `images`，且与源字节一致 |
+| 纯文本 | 请求体**没有** `images` 字段 |
+| 澄清 / 重试 | 后续每一轮都重发同一批图 |
+| 编码失败 | 报 `polish/bad-image`，不发请求 |
+| 空文本开面板 | `input` 态保留 `imageFiles`，不消耗请求 |
+| action decoration | 读 composer 快照拿到图，**不提交**，输入框草稿与图都还在 |
+| 移除图片 | 用户在行仍含 `/polish` 时把图从输入框删掉 → 记忆被清空，下次提交不会复活已删除的图 |
+
+### 真实 GUI 端到端（不进 CI）
+
+`tmp/gui-payload.mjs` 与 `tmp/gui-command.mjs` 用 CDP 驱动真实 Chromium（Node 26 自带 WebSocket，无需依赖）：粘贴一张真 PNG、输入粗糙文本、点按钮或敲 `/polish <文本>`，然后**截 HTTP 请求体**断言 `images[0].data` 与源 PNG 的 base64 完全一致。两个入口各验一次。这是「图片真的到了模型」的直接证据；`npm test` 只能证明代码逻辑，证明不了浏览器里的实际载荷。
+
+Host 侧另用真实模型 API 验过：发一张 8×8 纯红 PNG，模型在出稿里引用了该附件对象；落盘对象的 sha256 与源图完全一致。
 
 ## 变异验证（证明测试不是空转）
 
@@ -104,14 +139,18 @@ Client：HTTP 非 2xx → `polish/transport-error`（带状态码）；业务失
 | `recordInput: false` → `true` | 1 项失败 ✓ |
 | `adopt` 里 `setDraft` → `submit` | 2 项失败（行为 + 源码）✓ |
 | 追问上限判断 `>= MAX_ROUNDS` → 实际失效 | 1 项失败 ✓ |
+| `userContent` 静默丢弃图片（`|| true`） | 3 项失败 ✓ |
+| 去掉 `polish/no-vision` 闸门（`|| false`） | 1 项失败 ✓ |
+| Client 请求体不再带 `images` | 2 项失败 ✓ |
 
 ## 未覆盖 / 已知缺口
 
 诚实列出，避免「全绿」被误读为「全覆盖」：
 
 - **盲读测试仍未执行**（人工，见下）。自动化测试不能证明转写质量好。
-- **浮层的真实渲染、样式、深色主题未测**：没有浏览器控制，也不允许引入 DOM 模拟或自定义渲染器。这部分只能靠真实 GUI 人工看。
-- **「不落盘」是间接断言**（假 ctx 无 fs + 源码正则），没有运行期拦截。
+- **浮层的真实渲染、样式、深色主题未测**：`npm test` 里没有浏览器，也不允许引入 DOM 模拟或自定义渲染器。图片通路的真实浏览器行为已用 `tmp/gui-*.mjs`（CDP）单独验证，但那两个脚本不进 CI；样式与深色主题仍只能人工看。
+- **附件存储无 GC 时长期占用未测**：宿主当前版本没有回收接口，重复转写同一张图靠内容寻址去重，不同图会累积。
+- **「不落盘」是间接断言**（假 ctx 无 fs + 源码正则），没有运行期拦截。注意图片准入**会**落盘（附件存储），这是设计的一部分，见 `decisions.md`。
 - **「切换会话丢弃在途请求」未直接测**：状态按 `sessionId` 分键，切会话只是读另一个键；已测等价性质「过期响应被丢弃」。
 - **Host 侧追问上限仍只是提示词请求**（`userPrompt` 依据 Client 报来的 `rounds` 告诉模型别再问）；硬拦截只在 Client。若模型在 Host 侧被其它入口直接调用，没有第二道闸。
 - **预算只在内存**：`rounds` 不落盘，刷新页面后按 0 重算（与「不进会话历史」一致）。

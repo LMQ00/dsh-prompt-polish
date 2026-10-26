@@ -9,7 +9,10 @@
  * Boundaries this half must keep (see docs/decisions.md):
  * - never touches `agentLoop` and never appends a session event, so nothing
  *   about the user's text reaches the model's context;
- * - never calls any filesystem write interface;
+ * - never calls any filesystem write interface directly: images reach the
+ *   model through `ctx.attachments.admitPromptContent`, the same durable
+ *   admission every composer submission uses, which stores normalized bytes in
+ *   the deployment's content-addressed attachment root;
  * - never sends anything: sending is the user's own action in the composer.
  *
  * The `/polish` command exists only so the command is discoverable in the
@@ -39,14 +42,33 @@ export const name = 'polish';
  * `webServer` hosts the plugin's own route; `connection` supplies the browser
  * trust and authentication predicate for it; `sessionQuery` is how the recent
  * conversation is read so a translation can resolve what "这个" refers to.
+ * `attachments` is the durable admission path every image must cross before a
+ * model adapter can read its bytes.
  */
-export const inject = ['commands', 'llm', 'agentDefaultModel', 'connection', 'webServer', 'sessionQuery'];
+export const inject = [
+	'commands',
+	'llm',
+	'agentDefaultModel',
+	'connection',
+	'webServer',
+	'sessionQuery',
+	'attachments',
+];
 
 /** Absolute path of the plugin's own route; no trailing slash. */
 const ROUTE_PATH = '/polish/translate';
 
-/** Largest request body accepted, in bytes. */
-const MAX_BODY_BYTES = 64 * 1024;
+/**
+ * Largest request body accepted, in bytes. Images ride along base64-encoded, so
+ * the cap has to cover the deployment's own per-message image budget
+ * (`maxMessageImageBytes`, 200 MiB by default) after base64 expansion plus the
+ * text and envelope headroom. The shipped `/api` carrier uses the same sizing
+ * rationale for its own cap.
+ */
+const MAX_BODY_BYTES = 300 * 1024 * 1024;
+
+/** Largest request body carrying no image; keeps plain-text requests cheap to refuse. */
+const MAX_TEXT_BODY_BYTES = 64 * 1024;
 
 /**
  * How many recent user/assistant messages may ride along as context, and how
@@ -237,6 +259,90 @@ function userPrompt(request) {
 }
 
 /**
+ * The media types the composer can turn into an image draft, mirroring the
+ * shipped browser intake. Anything else never arrives as an image part.
+ */
+const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
+/**
+ * Normalize the images the Client sent into the wire parts the attachment
+ * service admits.
+ *
+ * The Client is untrusted input: a malformed part is dropped rather than
+ * failing the whole request, because the user's text is still worth
+ * translating. Every surviving part is still validated by the attachment
+ * service itself (canonical base64, media type, byte and pixel limits), so
+ * dropping here only narrows what reaches admission, it never bypasses it.
+ *
+ * @param images - the request's `images` array, of unknown shape.
+ * @returns encoded image parts ready for `admitPromptContent`.
+ */
+function imageParts(images) {
+	if (!Array.isArray(images)) return [];
+	const parts = [];
+	for (const image of images) {
+		if (image === null || typeof image !== 'object') continue;
+		const mediaType = typeof image.mediaType === 'string' ? image.mediaType : '';
+		const data = typeof image.data === 'string' ? image.data : '';
+		if (!IMAGE_MEDIA_TYPES.has(mediaType) || data === '') continue;
+		const name = typeof image.name === 'string' && image.name !== '' ? image.name : undefined;
+		parts.push(name === undefined ? { type: 'image', mediaType, data } : { type: 'image', mediaType, data, name });
+	}
+	return parts;
+}
+
+/**
+ * Whether one exact model route can accept image content.
+ *
+ * A route that declares no `inputModalities` is treated as image-capable: the
+ * adapters document the field as advisory, and refusing on its absence would
+ * turn a working model into a hard error. A route that declares modalities
+ * without `image` is refused explicitly instead of silently dropping the
+ * pictures the user attached.
+ *
+ * @param ctx - Host plugin context carrying `llm`.
+ * @param selection - the resolved provider/model route.
+ * @param signal - cancellation for the capability lookup.
+ * @returns true when images may be sent on this route.
+ */
+async function acceptsImages(ctx, selection, signal) {
+	let info;
+	try {
+		info = await ctx.llm.resolveModelInfo(selection.provider, selection.model, signal);
+	} catch {
+		// A capability lookup failure must not cost the user their images: let the
+		// request proceed and let the adapter report the authoritative refusal.
+		return true;
+	}
+	const modalities = info?.inputModalities;
+	if (!Array.isArray(modalities)) return true;
+	return modalities.includes('image');
+}
+
+/**
+ * Build the user content for one translation request.
+ *
+ * Text comes first and images follow, which is the order every adapter and the
+ * browser composer use. Images are admitted through the same durable service a
+ * composer submission uses, so the blocks carry the references the adapters
+ * read bytes through — the plugin never touches those bytes itself.
+ *
+ * @param ctx - Host plugin context carrying `attachments`.
+ * @param text - the rendered user prompt.
+ * @param images - already-normalized encoded image parts.
+ * @returns the ordered content blocks for the user turn.
+ */
+async function userContent(ctx, text, images) {
+	if (images.length === 0) return [{ type: 'text', text }];
+	const admitted = await ctx.attachments.admitPromptContent(images);
+	return [
+		{ type: 'text', text },
+		...admitted.map((part) => ({ type: 'image', attachment: part.attachment })),
+	];
+}
+
+
+/**
  * Strip a code fence and any surrounding prose, then parse the first JSON object.
  * @param text - raw model text.
  * @returns the parsed value.
@@ -299,13 +405,14 @@ function normalizeModelValue(value) {
  * Nothing here is session-scoped: the request carries no `sessionId` and no
  * `purpose`, so the call cannot land in any session's history.
  *
- * @param ctx - Host plugin context carrying `llm` and `agentDefaultModel`.
- * @param request - rough text plus optional transcript and feedback.
+ * @param ctx - Host plugin context carrying `llm`, `agentDefaultModel`, and `attachments`.
+ * @param request - rough text plus optional transcript, feedback, and images.
  * @param signal - caller cancellation from the RPC invocation.
  * @returns the translation value.
  */
 async function translate(ctx, request, signal) {
 	const text = typeof request?.text === 'string' ? request.text.trim() : '';
+	const images = imageParts(request?.images);
 	if (text === '') {
 		const error = new Error('先写点东西再触发转写');
 		error.code = 'polish/empty-input';
@@ -322,8 +429,26 @@ async function translate(ctx, request, signal) {
 	}
 
 	const deadline = AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]);
+	if (images.length > 0 && !(await acceptsImages(ctx, selection, deadline))) {
+		const error = new Error(`当前模型（${model}）不支持图片输入，请换一个支持图片的模型，或先从输入框移除图片`);
+		error.code = 'polish/no-vision';
+		throw error;
+	}
+
 	const context = await recentContext(ctx, request?.sessionId, deadline);
-	const messages = [{ role: 'user', content: [{ type: 'text', text: userPrompt({ ...request, text, context }) }] }];
+	const prompt = userPrompt({ ...request, text, context });
+	let content;
+	try {
+		content = await userContent(ctx, prompt, images);
+	} catch (cause) {
+		// Admission owns every image policy (format, bytes, pixels, count). Its
+		// refusal is the user's answer, not an internal fault, so it keeps its own
+		// message instead of becoming a generic model failure.
+		const error = new Error(cause instanceof Error ? cause.message : String(cause));
+		error.code = 'polish/bad-image';
+		throw error;
+	}
+	const messages = [{ role: 'user', content }];
 
 	let output = '';
 	let finish;
@@ -408,9 +533,16 @@ function sendJson(res, status, body) {
 }
 
 /**
- * Read the whole request body, refusing anything oversized.
+ * Read the whole request body, refusing anything above the hard transport cap.
+ *
+ * Image requests legitimately carry base64 payloads measured in megabytes, so
+ * the read itself is bounded by {@link MAX_BODY_BYTES} — the same reasoning the
+ * shipped `/api` carrier uses. The much tighter {@link MAX_TEXT_BODY_BYTES}
+ * bound is applied after parsing, where the payload is known to carry no
+ * images; see {@link handleHttp}.
+ *
  * @param req - the incoming request.
- * @returns the body text, or undefined when it exceeded {@link MAX_BODY_BYTES}.
+ * @returns the body text and its byte length, or undefined when it exceeded {@link MAX_BODY_BYTES}.
  */
 async function readBody(req) {
 	let size = 0;
@@ -420,7 +552,16 @@ async function readBody(req) {
 		if (size > MAX_BODY_BYTES) return undefined;
 		chunks.push(chunk);
 	}
-	return Buffer.concat(chunks).toString('utf8');
+	return { text: Buffer.concat(chunks).toString('utf8'), bytes: size };
+}
+
+/**
+ * Build the refusal for one request body over its effective cap.
+ * @param cap - the byte cap that applies to this request.
+ * @returns the business failure envelope.
+ */
+function tooLarge(cap) {
+	return failure('polish/bad-request', `请求体超过 ${cap} 字节`);
 }
 
 /**
@@ -458,16 +599,24 @@ async function handleHttp(ctx, req, res) {
 	const body = await readBody(req);
 	if (body === undefined) {
 		settled = true;
-		sendJson(res, 413, failure('polish/bad-request', `请求体超过 ${MAX_BODY_BYTES} 字节`));
+		sendJson(res, 413, tooLarge(MAX_BODY_BYTES));
 		return;
 	}
 
 	let payload;
 	try {
-		payload = JSON.parse(body === '' ? '{}' : body);
+		payload = JSON.parse(body.text === '' ? '{}' : body.text);
 	} catch {
 		settled = true;
 		sendJson(res, 400, failure('polish/bad-request', '请求体不是合法 JSON'));
+		return;
+	}
+
+	// A request carrying no image keeps the original tight cap, so a text-only
+	// client cannot push a multi-megabyte body through the image allowance.
+	if (imageParts(payload?.images).length === 0 && body.bytes > MAX_TEXT_BODY_BYTES) {
+		settled = true;
+		sendJson(res, 413, tooLarge(MAX_TEXT_BODY_BYTES));
 		return;
 	}
 
@@ -486,7 +635,13 @@ export function apply(ctx) {
 			ctx.commands.register({
 				name: COMMAND_NAME,
 				description: '把粗糙提示词转写成规范提示词，确认后写入输入框',
-				input: { hint: '粗糙提示词（留空则用输入框当前内容）' },
+				// `attachments: true` is what lets a `/polish` submission carrying
+				// images through the composer's envelope gate at all: without it the
+				// composer refuses the whole submission before dispatch and the user
+				// has to delete the pictures. The handler ignores the admitted blocks
+				// (the Client re-reads its own draft pictures), so nothing about them
+				// reaches the session log; only the lifecycle pair is recorded.
+				input: { hint: '粗糙提示词（留空则用输入框当前内容）', attachments: true },
 				// The rough text must not reach the session log; the Client holds it.
 				recordInput: false,
 				// Discovery signal only: the Client owns the text, the overlay, and the write.

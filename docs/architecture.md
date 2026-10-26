@@ -1,6 +1,6 @@
 # 架构
 
-> 状态：**已实现**。所有「已核实」条目来自读 DSH `0.2.0-rc.2` 的契约与打包产物，不是推测。
+> 状态：**已实现**。所有「已核实」条目来自读 DSH `0.2.1-rc.2` 的契约与打包产物，不是推测。
 
 ## 一句话
 
@@ -71,21 +71,26 @@
 ```
 Client 浮层/按钮
   └─ 取粗糙文本（草稿，或从含 /polish 的最近一行里 stripCommand）
-      └─ 桥 → Host: POST /polish/translate { sessionId, text, transcript, feedback }
+  └─ 取输入框里的图片：attachmentIds → resolveDraftAttachments → File → base64
+      └─ 桥 → Host: POST /polish/translate { sessionId, text, transcript, feedback, images? }
           └─ 只读上下文：ctx.sessionQuery.observeSession(sessionId) → 尾部 8 条 user/assistant 文本
-              └─ 组装提示词 → ctx.llm（不带 sessionId、不带 purpose）
-              ├─ 模型要澄清 → { kind:'questions', questions[] } → 浮层渲染选项
-              │     └─ 用户回答 → transcript 追加一轮 → 桥再调一次（≤3 轮）
-              └─ 模型给稿 → { kind:'prompt', prompt, assumptions[] }
-                  └─ 浮层只读展示 → 采用 / 带反馈重试 / 放弃
-                      ├─ 采用 → inputActions.setDraft(prompt) → 关闭
-                      ├─ 重试 → 带 feedback 重新请求（feedback 必填）
-                      └─ 放弃 → 关闭，不改输入框
+              └─ 有图片时先探模型能力：ctx.llm.resolveModelInfo() 声明了 inputModalities 且不含 image → polish/no-vision
+                  └─ 图片准入：ctx.attachments.admitPromptContent(images) → ImageAttachmentRef[]
+                      └─ 组装提示词（文本在前、图片在后）→ ctx.llm（不带 sessionId、不带 purpose）
+                          ├─ 模型要澄清 → { kind:'questions', questions[] } → 浮层渲染选项
+                          │     └─ 用户回答 → transcript 追加一轮 → 桥再调一次（≤3 轮，图片每轮都重发）
+                          └─ 模型给稿 → { kind:'prompt', prompt, assumptions[] }
+                              └─ 浮层只读展示 → 采用 / 带反馈重试 / 放弃
+                                  ├─ 采用 → inputActions.setDraft(prompt) → 关闭
+                                  ├─ 重试 → 带 feedback 重新请求（feedback 必填，图片沿用）
+                                  └─ 放弃 → 关闭，不改输入框
 ```
+
+图片只在触发那一刻采集一次（抓到 `File` 句柄后存进浮层状态），之后澄清、重试都复用同一批 `File`；每次发请求前重新 base64，避免把编码后的字符串常驻内存。`/polish <文本>` 这条路径由 command 提交事务消耗草稿附件，所以提交后会把同一批 `File` 重新登记回输入框，用户不会丢图。
 
 ## 不变量
 
 1. 浮层是唯一的输出展示面：结果不进对话流、不进会话历史。
 2. 输入框只在「采用」时被写一次，且是整段替换。
 3. 任何失败都不清空用户已输入的粗糙文本。
-4. 插件运行期不写任何文件。
+4. 插件自己不写任何文件。唯一的落盘是图片准入：`ctx.attachments.admitPromptContent()` 会把图片规范化后写进部署的附件存储（内容寻址、自动去重、当前版本无 GC），这与用户正常发一条带图消息走的是同一条路径。插件本身不调用任何 fs 接口。

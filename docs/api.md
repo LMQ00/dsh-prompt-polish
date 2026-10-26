@@ -9,7 +9,8 @@
 | `name` | `polish` |
 | `description` | 把粗糙提示词转写成规范提示词，确认后写入输入框 |
 | `input.hint` | 粗糙提示词（留空则用输入框当前内容） |
-| `recordInput` | 默认（true）——命令名与参数会记进命令生命周期事件，便于排查 |
+| `input.attachments` | `true`——声明可以接受输入框附件，否则带图提交会在 composer 的闸门处被整条拒绝 |
+| `recordInput` | `false`——命令名与参数都不记进命令生命周期事件 |
 
 ### 参数语义
 
@@ -21,13 +22,17 @@
 
 `rawInput` 按 `parseCommand` 的原样传入，首尾空白由插件 trim；trim 后为空即视为无参数。
 
-### 已知副作用
+两个入口都会带上输入框里的图片（见下「HTTP 契约」的 `images`）：
 
-`/polish` 会在对话流里留下一条命令记录行 —— 这是 DSH 命令机制的固有行为（`command/run`、`command/done` 是 log-only 事件，**模型不可见**，不进模型上下文）。若这条行在实测中不可接受，退路是只保留输入框工具条按钮作为入口（代价：失去命令参数这一输入来源）。
+| 入口 | 走哪条路 | 图片随行方式 |
+| --- | --- | --- |
+| 工具条按钮 | Client 直接读草稿 + `attachmentIds` | 读 `File` → base64 写进请求 |
+| `/polish`（无参数） | `ctx.commandUi` 的 action decoration：消费 token、不提交 | 图片留在输入框，action 里再读一次 |
+| `/polish <文本>` | 命令 claim → 提交事务（Host 准入附件） | 提交会释放草稿附件，Client 事后再把同一批 `File` 登记回输入框 |
 
 ### 已实现的行为
 
-- 命令 `name: 'polish'`，`recordInput: false`，`input: { hint: '粗糙提示词（留空则用输入框当前内容）' }`。
+- 命令 `name: 'polish'`，`recordInput: false`，`input: { hint: '粗糙提示词（留空则用输入框当前内容）', attachments: true }`。
 - handler 只返回 `{ kind: 'success' }`，**不返回任何 text**：粗糙文本与规范提示词都不写进 `command/run` / `command/done`。
 - 粗糙文本由 Client 提供：点按钮取当前草稿；打 `/polish` 时取按钮组件记下的、含 `/polish` 的最近一行，再用 `stripCommand` 去掉命令 token（token 可能在行首或行尾），其余原样保留。
 - 因此上表「参数语义」在实现上等价于：整行去掉 `/polish` 后的剩余文本就是粗糙文本；剩余为空 → `polish/empty-input`。
@@ -88,10 +93,12 @@
   | `POST /polish/nope` | `405`（fallback 对 POST 的方法处理，**不是 404**） |
 
   所以「路由是否真的挂上」要看 `/polish/translate` 得 401、`/polish/nope` 得 404/405，两者不是同一个数。
-- 请求体上限 64 KiB（`MAX_BODY_BYTES`）→ 超限 413；非 POST → 405；非 JSON → 400。
-- 请求：`{ sessionId?: string, text: string, transcript: [{ questions, answers }], rounds?: number, feedback: string }`。
+- 请求体上限分两档：**不带图片**时 64 KiB（`MAX_TEXT_BODY_BYTES`）；**带图片**时 300 MiB（`MAX_BODY_BYTES`，覆盖 base64 膨胀与部署的 `maxMessageImageBytes`）。超限 413；非 POST → 405；非 JSON → 400。两档都按解析后的请求内容判定，因此文本请求不可能借图片额度塞进大 body。
+- 请求：`{ sessionId?: string, text: string, transcript: [{ questions, answers }], rounds?: number, feedback: string, images?: [{ mediaType, data, name? }] }`。
+- `images` 是**可选**的输入框图片：`mediaType` 取 `image/png|jpeg|webp|gif`，`data` 是**不带 data-URL 前缀**的标准 base64，`name` 可选。畸形的图片项（未知类型、空 `data`、非对象）会被丢弃而不是让整次转写失败——用户的文本仍然值得转写；存活下来的每一项仍要过附件服务自己的完整校验（base64 规范性、字节数、像素数、张数）。
 - `rounds` 是**本次尝试已花掉的追问轮次**，由 Client 报上来（Host 用它决定是否写「问满轮次，别再问」）。缺省时回退到 `transcript.length`。
 - `sessionId` 只用于**读**该会话最近的消息作为消歧上下文（见下）；缺失或读取失败一律降级为「无上下文」，不影响转写。
+- 图片的落盘由 `ctx.attachments.admitPromptContent()` 负责：Host 只把 `ImageAttachmentRef` 塞进 `ctx.llm` 的消息，自己不碰字节，也不调用任何 fs 接口。
 - 成功（HTTP 200）：`{ ok: true, value: { kind:'questions', questions } | { kind:'prompt', prompt, assumptions } }`。
 - 业务失败（HTTP 200）：`{ ok: false, error: { code, message, details } }`。
 
@@ -122,7 +129,9 @@
 | `polish/timeout` | 超过 `TIMEOUT_MS` | 超过 60 秒仍未返回 | 是 |
 | `polish/aborted` | 调用方中止（关浮层、换会话） | 不显示（已静默关闭） | — |
 | `polish/transport-error` | Client 侧 HTTP 非 2xx，或 fetch 本身失败 | 转写接口返回 HTTP xxx / 传输错误原文 | 是 |
-| `polish/bad-request` | 请求体不是 JSON，或超过 64 KiB | 请求体不是合法 JSON / 超过 64 KiB | — |
+| `polish/bad-request` | 请求体不是 JSON，或超过当前档位的上限 | 请求体不是合法 JSON / 超过 N 字节 | — |
+| `polish/no-vision` | 请求带图片，而当前默认模型声明了 `inputModalities` 且不含 `image` | 当前模型（xxx）不支持图片输入，请换一个支持图片的模型，或先从输入框移除图片 | 换模型后可重试 |
+| `polish/bad-image` | 图片准入被附件服务拒绝（超字节/像素/张数上限等），**保留服务自己给的原因** | 服务原文 | 换图或缩小后可重试 |
 | `polish/round-limit` | 已问满 `MAX_ROUNDS` 轮，模型仍返回 `questions`（**Client 侧硬拦截**） | 已经问满 3 轮澄清，模型仍在追问。重试会让它直接出稿。 | 是（重试保留 transcript，Host 随即要求模型直接出稿） |
 
 所有错误都不清空用户已输入的粗糙文本。

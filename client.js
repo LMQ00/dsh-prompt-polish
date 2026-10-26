@@ -39,6 +39,13 @@ window.__ModuleLoader__.load({
 		/** Clarification rounds allowed before the Host is told to settle. */
 		const MAX_ROUNDS = 3;
 
+		/**
+		 * Browser-declared image types the composer turns into image drafts, and
+		 * the only types the Host admits. Anything else in the draft is ignored
+		 * here: generic files cannot reach a model as pixels.
+		 */
+		const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
 		/** The closed overlay state. */
 		const IDLE = { phase: 'idle' };
 
@@ -119,8 +126,32 @@ window.__ModuleLoader__.load({
 		const states = new Map();
 		/** Subscribers re-read the whole map on any change. */
 		const subscribers = new Set();
+		/**
+		 * Remember (or forget) the pictures an existing `/polish` line will carry.
+		 *
+		 * A command submission consumes the composer's draft rail, so the Files
+		 * have to be captured while the line still names the command. An empty
+		 * rail while the line is still typed means the user removed the pictures,
+		 * and forgetting them is what stops a later submission from sending
+		 * pictures the user had already taken back.
+		 *
+		 * @param memory - the per-Session picture map.
+		 * @param sessionId - the Session.
+		 * @param files - pictures currently in the rail.
+		 */
+		function rememberCommandImages(memory, sessionId, files) {
+			if (Array.isArray(files) && files.length > 0) memory.set(sessionId, files);
+			else memory.delete(sessionId);
+		}
+
 		/** Last composer line that named `/polish`, per Session. */
 		const commandLines = new Map();
+		/**
+		 * Pictures that were attached when the last `/polish` line was typed, per
+		 * Session. A submitted command consumes the draft rail, so the Files have
+		 * to be captured before that hand-over; see the button component's effect.
+		 */
+		const commandImages = new Map();
 
 		/**
 		 * Read one Session's overlay state.
@@ -139,6 +170,156 @@ window.__ModuleLoader__.load({
 		function writeState(sessionId, next) {
 			states.set(sessionId, next);
 			for (const notify of [...subscribers]) notify();
+		}
+
+		/**
+		 * Resolve draft attachment ids to their live browser descriptors.
+		 *
+		 * The Conversation service owns the draft rail; a plugin only ever sees
+		 * the ids. Any failure degrades to "no attachments" — a picture that
+		 * cannot be read must not cost the user their text.
+		 *
+		 * The service is resolved lazily through `get` rather than injected, so
+		 * this half keeps working if the Conversation bundle loads it in either
+		 * order.
+		 *
+		 * @param ctx - Client plugin context.
+		 * @param ids - attachment ids from the input state.
+		 * @returns the live descriptors, in input order.
+		 */
+		function draftAttachmentsOf(ctx, ids) {
+			if (!Array.isArray(ids) || ids.length === 0) return [];
+			try {
+				const resolved = ctx.get('conversation')?.resolveDraftAttachments?.(ids);
+				return Array.isArray(resolved) ? resolved : [];
+			} catch {
+				return [];
+			}
+		}
+
+		/**
+		 * Keep only the pictures among the composer's draft attachments.
+		 * @param attachments - live draft descriptors.
+		 * @returns the image descriptors, in input order.
+		 */
+		function imageDraftsOf(attachments) {
+			return (Array.isArray(attachments) ? attachments : []).filter(
+				(attachment) =>
+					attachment?.kind === 'image' && attachment.file !== undefined && IMAGE_MEDIA_TYPES.has(attachment.file.type),
+			);
+		}
+
+		/**
+		 * Canonical base64 of a byte array.
+		 * @param bytes - the encoded file bytes.
+		 * @returns base64 text without a data-URL prefix.
+		 */
+		function base64Of(bytes) {
+			let binary = '';
+			// Chunked so a large screenshot cannot blow the argument limit.
+			const chunk = 0x8000;
+			for (let index = 0; index < bytes.length; index += chunk) {
+				binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+			}
+			return btoa(binary);
+		}
+
+		/**
+		 * Encode one browser image file into the wire part the Host admits.
+		 * @param file - the browser File behind one image draft.
+		 * @returns the encoded image part.
+		 */
+		async function encodeImageFile(file) {
+			const bytes = new Uint8Array(await file.arrayBuffer());
+			return {
+				mediaType: file.type,
+				data: base64Of(bytes),
+				...(typeof file.name === 'string' && file.name !== '' ? { name: file.name } : {}),
+			};
+		}
+
+		/**
+		 * Encode already-captured image files.
+		 * @param files - browser Files kept from an earlier draft snapshot.
+		 * @returns encoded image parts, in input order.
+		 */
+		async function encodeImageFiles(files) {
+			return await Promise.all((Array.isArray(files) ? files : []).map((file) => encodeImageFile(file)));
+		}
+
+		/**
+		 * Read the composer draft straight from the Session input shell.
+		 *
+		 * Only the command action path needs this: the decoration runs after the
+		 * trigger token was consumed, so it cannot read the draft from a rendered
+		 * component. Failures degrade to an empty draft.
+		 *
+		 * @param ctx - Client plugin context.
+		 * @param sessionId - the Session.
+		 * @returns the draft text, or an empty string.
+		 */
+		function composerDraft(ctx, sessionId) {
+			try {
+				const actx = ctx.get('sessions')?.scope?.(sessionId);
+				if (actx === undefined) return '';
+				const snapshot = ctx.get('conversation')?.input?.for?.(actx)?.snapshot;
+				return typeof snapshot?.draft === 'string' ? snapshot.draft : '';
+			} catch {
+				return '';
+			}
+		}
+
+		/**
+		 * Read the composer's current draft pictures straight from the input state.
+		 * @param ctx - Client plugin context.
+		 * @param sessionId - the Session.
+		 * @returns browser Files for each image draft, in rail order.
+		 */
+		function composerImageFiles(ctx, sessionId) {
+			try {
+				const actx = ctx.get('sessions')?.scope?.(sessionId);
+				if (actx === undefined) return [];
+				const snapshot = ctx.get('conversation')?.input?.for?.(actx)?.snapshot;
+				return imageDraftsOf(draftAttachmentsOf(ctx, snapshot?.attachmentIds)).map((draft) => draft.file);
+			} catch {
+				return [];
+			}
+		}
+
+		/**
+		 * Put pictures back into the composer after a command submission consumed
+		 * them.
+		 *
+		 * The shipped submit transaction releases an accepting command's draft
+		 * attachments once the handler settles, which would leave the user with a
+		 * polished prompt and no pictures. Re-registering the same Files restores
+		 * the rail; the retry covers the hand-over: the release happens inside the
+		 * same settle tick, so the first attempt can still see a locked phase.
+		 *
+		 * @param ctx - Client plugin context.
+		 * @param sessionId - the Session.
+		 * @param files - browser Files captured from the consumed draft.
+		 */
+		function restoreDraftImages(ctx, sessionId, files) {
+			if (!Array.isArray(files) || files.length === 0) return;
+			let drafts;
+			let attempts = 0;
+			const attempt = () => {
+				attempts += 1;
+				try {
+					const conversation = ctx.get('conversation');
+					if (drafts === undefined) drafts = conversation?.createDrafts?.(sessionId, files) ?? [];
+					if (drafts.length === 0) return;
+					const actx = ctx.get('sessions')?.scope?.(sessionId);
+					if (actx === undefined) return;
+					if (conversation.input.for(actx).addAttachments(drafts.map((draft) => draft.id))) return;
+				} catch {
+					return;
+				}
+				if (attempts >= 4) return;
+				setTimeout(attempt, 25);
+			};
+			setTimeout(attempt, 0);
 		}
 
 		/**
@@ -210,6 +391,28 @@ window.__ModuleLoader__.load({
 		 */
 		async function run(ctx, sessionId, state) {
 			try {
+				// Encoding happens per attempt, not once: the browser Files stay
+				// readable for the life of the Session scope, so a retry or a
+				// clarification round resends the same pictures without a second
+				// capture, and a rejected request never leaves stale bytes behind.
+				// The text-only path deliberately encodes nothing and stays
+				// synchronous, so a plain request is not delayed by a microtask.
+				let images = [];
+				if (Array.isArray(state.imageFiles) && state.imageFiles.length > 0) {
+					try {
+						images = await encodeImageFiles(state.imageFiles);
+					} catch (error) {
+						if (state.controller.signal.aborted) return;
+						if (readState(sessionId) !== state) return;
+						writeState(sessionId, {
+							...state,
+							phase: 'error',
+							code: 'polish/bad-image',
+							message: error instanceof Error ? error.message : String(error),
+						});
+						return;
+					}
+				}
 				const response = await fetch(ROUTE, {
 					method: 'POST',
 					headers: { 'content-type': 'application/json' },
@@ -219,6 +422,7 @@ window.__ModuleLoader__.load({
 						transcript: state.transcript,
 						rounds: state.rounds ?? 0,
 						feedback: state.feedback ?? '',
+						...(images.length > 0 ? { images } : {}),
 					}),
 					signal: state.controller.signal,
 				});
@@ -292,8 +496,9 @@ window.__ModuleLoader__.load({
 		 * @param source - the rough text, already trimmed.
 		 * @param transcript - clarification rounds to carry into this attempt.
 		 * @param rounds - clarification rounds this attempt has already spent.
+		 * @param imageFiles - browser Files captured from the composer's draft rail.
 		 */
-		function translateWith(ctx, sessionId, source, transcript, rounds = 0) {
+		function translateWith(ctx, sessionId, source, transcript, rounds = 0, imageFiles = []) {
 			const previous = readState(sessionId);
 			if (previous.controller !== undefined) previous.controller.abort();
 			const state = {
@@ -302,6 +507,7 @@ window.__ModuleLoader__.load({
 				transcript: Array.isArray(transcript) ? transcript : [],
 				rounds: Number.isFinite(rounds) ? rounds : 0,
 				feedback: '',
+				imageFiles: Array.isArray(imageFiles) ? imageFiles : [],
 				controller: new AbortController(),
 			};
 			writeState(sessionId, state);
@@ -315,19 +521,25 @@ window.__ModuleLoader__.load({
 		 * its input phase, so the rough request can be typed right there instead of
 		 * sending the user back to the composer.
 		 *
+		 * Pictures already in the composer ride along either way: they are part of
+		 * what the user is asking about, so opening the panel must not silently
+		 * detach them.
+		 *
 		 * @param ctx - Client plugin context.
 		 * @param sessionId - the Session.
 		 * @param text - the rough text, possibly empty.
+		 * @param imageFiles - browser Files captured from the composer's draft rail.
 		 */
-		function start(ctx, sessionId, text) {
+		function start(ctx, sessionId, text, imageFiles = []) {
 			const source = typeof text === 'string' ? text.trim() : '';
+			const files = Array.isArray(imageFiles) ? imageFiles : [];
 			if (source === '') {
 				const previous = readState(sessionId);
 				if (previous.controller !== undefined) previous.controller.abort();
-				writeState(sessionId, { phase: 'input', source: '' });
+				writeState(sessionId, { phase: 'input', source: '', imageFiles: files });
 				return;
 			}
-			translateWith(ctx, sessionId, source, []);
+			translateWith(ctx, sessionId, source, [], 0, files);
 		}
 
 		/**
@@ -347,6 +559,10 @@ window.__ModuleLoader__.load({
 				// The budget was already charged when the questions were shown.
 				rounds: state.rounds ?? 0,
 				feedback: '',
+				// The pictures were captured at trigger time; every later round of
+				// the same attempt keeps them, so the model never loses the image it
+				// is asking questions about.
+				imageFiles: state.imageFiles ?? [],
 				controller: new AbortController(),
 			};
 			writeState(sessionId, next);
@@ -375,6 +591,8 @@ window.__ModuleLoader__.load({
 				transcript: state.transcript ?? [],
 				rounds: state.phase === 'review' ? 0 : (state.rounds ?? 0),
 				feedback: typeof feedback === 'string' ? feedback.trim() : '',
+				// A retry is the same request, so the pictures stay with it.
+				imageFiles: state.imageFiles ?? [],
 				controller: new AbortController(),
 			};
 			writeState(sessionId, next);
@@ -440,9 +658,10 @@ window.__ModuleLoader__.load({
 		function apply(ctx) {
 			installStyles(ctx);
 
-			/** Trigger button: reads the draft, opens the overlay. */
+			/** Trigger button: reads the draft and its pictures, opens the overlay. */
 			function PolishButton({ sessionId, useInput }) {
 				const draft = useInput((state) => state.draft);
+				const attachmentIds = useInput((state) => state.attachmentIds);
 				const state = usePolishState(sessionId);
 				const busy = state.phase !== 'idle' && state.phase !== 'error';
 
@@ -451,6 +670,19 @@ window.__ModuleLoader__.load({
 					// composer must not erase the text the command was submitted with.
 					if (typeof draft === 'string' && draft.includes(`/${COMMAND}`)) commandLines.set(sessionId, draft);
 				}, [draft, sessionId]);
+
+				React.useEffect(() => {
+					// Pictures vanish from the rail once a command submission consumes
+					// them, so the last set seen while the line still names `/polish` is
+					// what that invocation should translate. Capturing the live Files
+					// here (not the ids) is what survives the rail release.
+					if (typeof draft !== 'string' || !draft.includes(`/${COMMAND}`)) return;
+					rememberCommandImages(
+						commandImages,
+						sessionId,
+						imageDraftsOf(draftAttachmentsOf(ctx, attachmentIds)).map((item) => item.file),
+					);
+				}, [draft, attachmentIds, sessionId]);
 
 				return h(
 					'button',
@@ -461,7 +693,13 @@ window.__ModuleLoader__.load({
 						title: '规范提示词（/polish）',
 						'aria-label': '规范提示词',
 						disabled: busy,
-						onClick: () => start(ctx, sessionId, stripCommand(draft)),
+						onClick: () =>
+							start(
+								ctx,
+								sessionId,
+								stripCommand(draft),
+								imageDraftsOf(draftAttachmentsOf(ctx, attachmentIds)).map((item) => item.file),
+							),
 					},
 					h(TriggerIcon),
 				);
@@ -669,8 +907,17 @@ window.__ModuleLoader__.load({
 								primary: true,
 								disabled: sourceDraft.trim() === '',
 								// An error retry keeps the clarification rounds already earned;
-								// a first attempt from the input phase starts with none.
-								onClick: () => translateWith(ctx, sessionId, sourceDraft.trim(), state.transcript ?? [], state.rounds ?? 0),
+								// a first attempt from the input phase starts with none. Either
+								// way the pictures captured at trigger time stay attached.
+								onClick: () =>
+									translateWith(
+										ctx,
+										sessionId,
+										sourceDraft.trim(),
+										state.transcript ?? [],
+										state.rounds ?? 0,
+										state.imageFiles ?? [],
+									),
 							}),
 							h(Action, { key: 'close', label: '关闭', onClick: () => dismiss(sessionId) }),
 						]),
@@ -725,11 +972,55 @@ window.__ModuleLoader__.load({
 				),
 			);
 
+			// The Host command declares `input.attachments: true` so a submission
+			// carrying pictures clears the composer's envelope gate, but a claiming
+			// command is also what inserts a command chip and waits for the args —
+			// the wrong shape for a one-shot action. This decoration makes the bare
+			// `/polish` invocation an action instead: the token is consumed, nothing
+			// is submitted, and the pictures therefore stay in the composer's rail.
+			// An argued `/polish <text>` never reaches a decoration (the shipped
+			// adjudicator only decorates the bare token), so that path still claims
+			// the line and the remembered-pictures hand-over below covers it.
+			//
+			// Waiting on the service through `ctx.inject` (rather than reading
+			// `ctx.commandUi`) is what the shipped plugins do: `commandUi` is not in
+			// this plugin's `inject` list, and a bare property read of a service the
+			// plugin never declared throws instead of yielding undefined.
+			ctx.inject(['commandUi'], (scope) => {
+				scope.effect(
+					() =>
+						scope.commandUi.decorate({
+							name: COMMAND,
+							available: (session) => session !== undefined,
+							ui: {
+								kind: 'action',
+								run: (session) => {
+									const sessionId = session?.sessionId;
+									if (sessionId === undefined) return;
+									// The token was just consumed, so the draft no longer names
+									// the command; the remembered line is the one that did.
+									const line = commandLines.get(sessionId) ?? composerDraft(ctx, sessionId);
+									commandLines.delete(sessionId);
+									const files = commandImages.get(sessionId) ?? composerImageFiles(ctx, sessionId);
+									commandImages.delete(sessionId);
+									start(ctx, sessionId, stripCommand(line), files);
+								},
+							},
+						}),
+					'polish: /polish action decoration',
+				);
+			});
+
 			ctx.on('command/executed', (sessionId, commandName) => {
 				if (commandName !== COMMAND) return;
 				const line = commandLines.get(sessionId) ?? '';
 				commandLines.delete(sessionId);
-				start(ctx, sessionId, stripCommand(line));
+				const files = commandImages.get(sessionId) ?? [];
+				commandImages.delete(sessionId);
+				// A claiming submission released the rail; hand the pictures back so
+				// the user keeps them alongside the polished prompt.
+				restoreDraftImages(ctx, sessionId, files);
+				start(ctx, sessionId, stripCommand(line), files);
 			});
 		}
 
@@ -753,6 +1044,9 @@ window.__ModuleLoader__.load({
 				stripCommand,
 				isMulti,
 				serializeAnswer,
+				imageDraftsOf,
+				encodeImageFiles,
+				rememberCommandImages,
 				run,
 				start,
 				translateWith,

@@ -90,16 +90,46 @@ function seed(state) {
 
 /**
  * Install the Client half against a fake context and capture its registrations.
- * @returns the registered slot keys/options and the registered event listeners.
+ * @param options - optional `conversation` service double and `sessions` scope map.
+ * @returns the registered slot keys/options, the registered event listeners, and the decorations.
  */
-function installClient() {
+function installClient(options = {}) {
 	const slots = [];
 	const listeners = [];
+	const decorations = [];
+	const services = {
+		conversation: options.conversation,
+		sessions: options.sessions,
+		commandUi: {
+			decorate(decoration) {
+				decorations.push(decoration);
+				return () => {};
+			},
+		},
+	};
 	client.apply({
 		effect(callback) {
 			callback();
 			return () => {};
 		},
+		inject(names, callback) {
+			// Cordis resolves the named services before running the body; the fake
+			// mirrors that by handing back a scope with the same `get`/`effect`.
+			const scope = {
+				get: (name) => services[name],
+				effect: (body) => {
+					body();
+					return () => {};
+				},
+				commandUi: services.commandUi,
+			};
+			callback(scope);
+			return () => {};
+		},
+		get(name) {
+			return services[name];
+		},
+		commandUi: services.commandUi,
 		slots: {
 			inject(key, callback) {
 				callback();
@@ -116,7 +146,7 @@ function installClient() {
 			return () => {};
 		},
 	});
-	return { slots, listeners };
+	return { slots, listeners, decorations };
 }
 
 // ── command parsing ───────────────────────────────────────────────────────────
@@ -455,8 +485,8 @@ test('composer write: the source contains a setDraft call and no submit call', (
 
 // ── registration ──────────────────────────────────────────────────────────────
 
-test('apply: registers both composer seats and the command listener', () => {
-	const { slots, listeners } = installClient();
+test('apply: registers both composer seats, the command listener, and the action decoration', () => {
+	const { slots, listeners, decorations } = installClient();
 	assert.deepEqual(
 		slots.filter((entry) => typeof entry === 'object').map((entry) => entry.id),
 		['polish', 'polish'],
@@ -469,6 +499,11 @@ test('apply: registers both composer seats and the command listener', () => {
 		listeners.map(([name]) => name),
 		['command/executed'],
 	);
+	// The decoration is what lets a bare `/polish` act without claiming, which is
+	// what keeps the composer's pictures in the rail.
+	assert.equal(decorations.length, 1);
+	assert.equal(decorations[0].name, 'polish');
+	assert.equal(decorations[0].ui.kind, 'action');
 });
 
 test('apply: another command name never opens the overlay', () => {
@@ -484,4 +519,177 @@ test('apply: /polish with nothing remembered opens the input phase', () => {
 	const [, handler] = listeners[0];
 	handler('session-command', 'polish');
 	assert.equal(internals.readState('session-command').phase, 'input');
+});
+
+// ── images ────────────────────────────────────────────────────────────────────
+
+/**
+ * Build one browser File double.
+ * @param type - declared MIME type.
+ * @param bytes - raw byte values.
+ * @param name - display name.
+ * @returns a File-shaped object.
+ */
+function makeFile(type, bytes = [1, 2, 3], name = 'shot.png') {
+	return {
+		type,
+		name,
+		async arrayBuffer() {
+			return new Uint8Array(bytes).buffer;
+		},
+	};
+}
+
+/** Install a global `btoa` when the test runtime lacks one. */
+if (typeof globalThis.btoa !== 'function') {
+	globalThis.btoa = (text) => Buffer.from(text, 'binary').toString('base64');
+}
+
+test('images: only accepted image drafts are collected, in rail order', () => {
+	const files = [makeFile('image/png'), makeFile('text/plain'), makeFile('image/webp')];
+	const attachments = [
+		{ kind: 'image', id: 'a', file: files[0] },
+		{ kind: 'file', id: 'b', file: files[1] },
+		{ kind: 'image', id: 'c', file: files[2] },
+	];
+	assert.deepEqual(
+		internals.imageDraftsOf(attachments).map((entry) => entry.id),
+		['a', 'c'],
+	);
+	assert.deepEqual(internals.imageDraftsOf(undefined), []);
+	assert.deepEqual(internals.imageDraftsOf([{ kind: 'image', id: 'x', file: makeFile('image/svg+xml') }]), []);
+});
+
+test('images: encoding yields the wire part the Host admits', async () => {
+	const [part] = await internals.encodeImageFiles([makeFile('image/png', [1, 2, 3], 'shot.png')]);
+	assert.deepEqual(part, { mediaType: 'image/png', data: 'AQID', name: 'shot.png' });
+});
+
+test('images: an unnamed file omits the name instead of sending an empty one', async () => {
+	const [part] = await internals.encodeImageFiles([makeFile('image/png', [9], '')]);
+	assert.equal('name' in part, false);
+});
+
+test('images: a trigger with pictures sends them with the first request', async () => {
+	const control = createFetchControl();
+	try {
+		internals.start({}, SESSION, '照这张图改', [makeFile('image/png', [1, 2, 3])]);
+		// Encoding is async, so the request lands one microtask later.
+		await tick();
+		assert.equal(control.calls.length, 1);
+		const body = JSON.parse(control.calls[0].init.body);
+		assert.deepEqual(body.images, [{ mediaType: 'image/png', data: 'AQID', name: 'shot.png' }]);
+		assert.equal(body.text, '照这张图改');
+	} finally {
+		control.restore();
+	}
+});
+
+test('images: a text-only trigger sends no images field at all', async () => {
+	const control = createFetchControl();
+	try {
+		internals.start({}, SESSION, '写个登录页');
+		assert.equal(control.calls.length, 1);
+		assert.equal('images' in JSON.parse(control.calls[0].init.body), false);
+	} finally {
+		control.restore();
+	}
+});
+
+test('images: clarification rounds and retries keep the same pictures', async () => {
+	const control = createFetchControl();
+	try {
+		const file = makeFile('image/png', [4, 5]);
+		internals.start({}, SESSION, '照这张图改', [file]);
+		await tick();
+		await control.settle(0, { ok: true, value: { kind: 'questions', questions: [{ id: 'q1', text: '改哪里？' }] } });
+		internals.submitAnswers({}, SESSION, ['配色']);
+		await tick();
+		assert.equal(control.calls.length, 2);
+		assert.deepEqual(JSON.parse(control.calls[1].init.body).images, [
+			{ mediaType: 'image/png', data: 'BAU=', name: 'shot.png' },
+		]);
+		await control.settle(1, { ok: true, value: { kind: 'prompt', prompt: 'P', assumptions: [] } });
+		internals.retry({}, SESSION, '太笼统');
+		await tick();
+		assert.equal(control.calls.length, 3);
+		assert.deepEqual(JSON.parse(control.calls[2].init.body).images, [
+			{ mediaType: 'image/png', data: 'BAU=', name: 'shot.png' },
+		]);
+	} finally {
+		control.restore();
+	}
+});
+
+test('images: a failed encoding reports polish/bad-image without touching the network', async () => {
+	const control = createFetchControl();
+	try {
+		const broken = {
+			type: 'image/png',
+			name: 'broken.png',
+			async arrayBuffer() {
+				throw new Error('read failed');
+			},
+		};
+		internals.start({}, SESSION, '照这张图改', [broken]);
+		await tick();
+		assert.equal(control.calls.length, 0);
+		const state = internals.readState(SESSION);
+		assert.equal(state.phase, 'error');
+		assert.equal(state.code, 'polish/bad-image');
+		assert.match(state.message, /read failed/);
+	} finally {
+		control.restore();
+	}
+});
+
+test('images: pictures stay attached when the panel opens in its input phase', () => {
+	const control = createFetchControl();
+	try {
+		const file = makeFile('image/png');
+		internals.start({}, SESSION, '   ', [file]);
+		const state = internals.readState(SESSION);
+		assert.equal(state.phase, 'input');
+		assert.deepEqual(state.imageFiles, [file]);
+		assert.equal(control.calls.length, 0);
+	} finally {
+		control.restore();
+	}
+});
+
+test('images: the action decoration reads the composer and keeps the rail untouched', () => {
+	const files = [makeFile('image/png')];
+	const snapshot = { draft: '照这张图改', attachmentIds: ['a'] };
+	let submitted = 0;
+	const { decorations } = installClient({
+		conversation: {
+			resolveDraftAttachments: () => [{ kind: 'image', id: 'a', file: files[0] }],
+			input: { for: () => ({ snapshot }) },
+		},
+		sessions: { scope: () => ({}) },
+	});
+	const control = createFetchControl();
+	try {
+		decorations[0].ui.run({ sessionId: SESSION });
+		const state = internals.readState(SESSION);
+		assert.equal(state.phase, 'drafting');
+		assert.deepEqual(state.imageFiles, files);
+		// An action never submits, so the composer's draft and pictures survive.
+		assert.equal(submitted, 0);
+	} finally {
+		control.restore();
+	}
+});
+
+test('images: removing the pictures from the rail forgets them for the next /polish', () => {
+	const memory = new Map();
+	const file = makeFile('image/png');
+	internals.rememberCommandImages(memory, SESSION, [file]);
+	assert.deepEqual(memory.get(SESSION), [file]);
+	// The user takes the picture back out while the line still names the command:
+	// a later submission must not resurrect it.
+	internals.rememberCommandImages(memory, SESSION, []);
+	assert.equal(memory.has(SESSION), false);
+	internals.rememberCommandImages(memory, SESSION, undefined);
+	assert.equal(memory.has(SESSION), false);
 });

@@ -87,11 +87,11 @@ function makeResponse() {
 /**
  * Install the plugin against a fake Host context and expose what it registered.
  *
- * The context carries exactly the six Services the plugin injects, plus
+ * The context carries exactly the seven Services the plugin injects, plus
  * `effect`. Nothing else exists, so a translation that quietly reached for
  * `agentLoop`, a filesystem, or a session append would fail here.
  *
- * @param options - per-test knobs: rejection, model selection, observation, gate, respond.
+ * @param options - per-test knobs: rejection, model selection, observation, gate, respond, modalities, admission.
  * @returns the fake context and the captured registrations.
  */
 function createHost(options = {}) {
@@ -99,6 +99,7 @@ function createHost(options = {}) {
 	const routes = [];
 	const llmCalls = [];
 	const observed = [];
+	const admissions = [];
 	const ctx = {
 		effect(callback) {
 			callback();
@@ -128,7 +129,32 @@ function createHost(options = {}) {
 				return options.observation ?? { events: [], [Symbol.dispose]() {} };
 			},
 		},
+		attachments: {
+			async admitPromptContent(content) {
+				admissions.push(content);
+				if (options.admissionError) throw options.admissionError;
+				return content.map((part, index) => ({
+					type: 'image',
+					attachment: {
+						attachmentId: `attachment-${index}`,
+						mediaType: part.mediaType,
+						bytes: 1,
+						width: 1,
+						height: 1,
+					},
+				}));
+			},
+		},
 		llm: {
+			async resolveModelInfo(provider, model) {
+				if (options.modelInfoError) throw options.modelInfoError;
+				return {
+					provider,
+					id: model,
+					name: model,
+					...(options.modalities === undefined ? {} : { inputModalities: options.modalities }),
+				};
+			},
 			stream(llmOptions) {
 				llmCalls.push(llmOptions);
 				return (async function* fakeStream() {
@@ -147,7 +173,7 @@ function createHost(options = {}) {
 		},
 	};
 	apply(ctx);
-	return { ctx, commands, routes, llmCalls, observed };
+	return { ctx, commands, routes, llmCalls, observed, admissions };
 }
 
 /**
@@ -181,7 +207,7 @@ function userText(host) {
 
 test('registration: the plugin declares its identity and every Service it needs', () => {
 	assert.equal(name, 'polish');
-	assert.deepEqual(inject, ['commands', 'llm', 'agentDefaultModel', 'connection', 'webServer', 'sessionQuery']);
+	assert.deepEqual(inject, ['commands', 'llm', 'agentDefaultModel', 'connection', 'webServer', 'sessionQuery', 'attachments']);
 });
 
 test('registration: one exact route at the documented path', () => {
@@ -517,4 +543,117 @@ test('boundaries: the Host half touches no session writer and no filesystem', as
 	const envelope = await translate(host, { text: 'x' });
 	assert.equal(envelope.ok, true);
 	assert.doesNotMatch(SOURCE, /\b(writeFile|appendFile|createWriteStream|mkdirSync|unlinkSync)\b/);
+});
+
+// ── images ────────────────────────────────────────────────────────────────────
+
+/** One 1x1 PNG as the Client would encode it. */
+const PNG_BASE64 =
+	'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+/**
+ * Build one encoded image part.
+ * @param overrides - fields to replace.
+ * @returns the wire part.
+ */
+function imagePart(overrides = {}) {
+	return { mediaType: 'image/png', data: PNG_BASE64, name: 'shot.png', ...overrides };
+}
+
+test('images: an attaching request admits every picture and sends them after the text', async () => {
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	const envelope = await translate(host, { text: '照这张图改', images: [imagePart()] });
+	assert.equal(envelope.ok, true);
+	assert.equal(host.admissions.length, 1);
+	assert.deepEqual(
+		host.admissions[0].map((part) => part.type),
+		['image'],
+	);
+	const content = host.llmCalls[0].messages[0].content;
+	assert.equal(content[0].type, 'text');
+	assert.match(content[0].text, /照这张图改/);
+	assert.equal(content[1].type, 'image');
+	assert.equal(content[1].attachment.attachmentId, 'attachment-0');
+	// The rough text still reaches the model as the user turn, pictures included.
+	assert.equal(host.llmCalls.length, 1);
+});
+
+test('images: a text-only request never touches the attachment service', async () => {
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	await translate(host, { text: '写个登录页' });
+	assert.equal(host.admissions.length, 0);
+	assert.deepEqual(
+		host.llmCalls[0].messages[0].content.map((block) => block.type),
+		['text'],
+	);
+});
+
+test('images: malformed parts are dropped instead of failing the translation', async () => {
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	const envelope = await translate(host, {
+		text: '写个登录页',
+		images: [imagePart({ mediaType: 'image/svg+xml' }), imagePart({ data: '' }), null, 'nope', imagePart()],
+	});
+	assert.equal(envelope.ok, true);
+	// Only the one well-formed picture is admitted.
+	assert.deepEqual(
+		host.admissions[0].map((part) => part.mediaType),
+		['image/png'],
+	);
+});
+
+test('images: a model without image input maps to polish/no-vision and spends nothing', async () => {
+	const host = createHost({ modalities: ['text'], respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	const envelope = await translate(host, { text: '照这张图改', images: [imagePart()] });
+	assert.equal(envelope.error.code, 'polish/no-vision');
+	assert.equal(host.llmCalls.length, 0);
+	assert.equal(host.admissions.length, 0);
+});
+
+test('images: a route that declares no modalities is treated as image-capable', async () => {
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	const envelope = await translate(host, { text: '照这张图改', images: [imagePart()] });
+	assert.equal(envelope.ok, true);
+	assert.equal(host.llmCalls.length, 1);
+});
+
+test('images: a capability lookup failure does not cost the user their pictures', async () => {
+	const host = createHost({
+		modelInfoError: new Error('adapter lookup failed'),
+		respond: () => textChunks('{"kind":"prompt","prompt":"P"}'),
+	});
+	const envelope = await translate(host, { text: '照这张图改', images: [imagePart()] });
+	assert.equal(envelope.ok, true);
+	assert.equal(host.llmCalls.length, 1);
+});
+
+test('images: an admission refusal keeps its own message under polish/bad-image', async () => {
+	const refusal = new Error('Image exceeds the configured byte limit.');
+	refusal.code = 'IMAGE_TOO_LARGE';
+	const host = createHost({ admissionError: refusal, respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	const envelope = await translate(host, { text: '照这张图改', images: [imagePart()] });
+	assert.equal(envelope.error.code, 'polish/bad-image');
+	assert.match(envelope.error.message, /byte limit/);
+	assert.equal(host.llmCalls.length, 0);
+});
+
+test('images: a request carrying no image keeps the tight 64 KiB cap', async () => {
+	const host = createHost();
+	const res = await callRoute(host, { body: JSON.stringify({ text: 'x'.repeat(70_000) }) });
+	assert.equal(res.status, 413);
+	assert.match(JSON.parse(res.body).error.message, /65536/);
+});
+
+test('images: an image request may exceed the text cap', async () => {
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	// A payload well over 64 KiB, but still one legal image request.
+	const body = JSON.stringify({ text: '照这张图改', images: [imagePart({ data: `${PNG_BASE64}${'A'.repeat(80_000)}` })] });
+	const res = await callRoute(host, { body });
+	assert.equal(res.status, 200);
+	assert.equal(JSON.parse(res.body).ok, true);
+});
+
+test('images: the command declares attachment acceptance so the composer lets them through', () => {
+	const host = createHost();
+	assert.equal(host.commands[0].input.attachments, true);
 });
