@@ -693,3 +693,78 @@ test('images: removing the pictures from the rail forgets them for the next /pol
 	internals.rememberCommandImages(memory, SESSION, undefined);
 	assert.equal(memory.has(SESSION), false);
 });
+
+// ── picture hand-over after a claimed submission ──────────────────────────────
+
+/**
+ * Install the Client against a composer whose rail a claimed submission can
+ * consume, the way the shipped submit transaction does on success.
+ * @returns the harness: listeners, the fake rail, and the recorded calls.
+ */
+function installClaimedRail() {
+	const file = makeFile('image/png', [7, 7], 'a.png');
+	const registry = new Map([['id-1', { kind: 'image', id: 'id-1', file }]]);
+	const created = [];
+	const added = [];
+	const rail = {
+		attachmentIds: ['id-1'],
+		snapshot: { draft: '/polish 照图改', attachmentIds: ['id-1'] },
+		addAttachments(ids) {
+			added.push([...ids]);
+			rail.attachmentIds = [...rail.attachmentIds, ...ids];
+			return true;
+		},
+	};
+	const conversation = {
+		resolveDraftAttachments: (ids) => ids.map((id) => registry.get(id)).filter(Boolean),
+		createDrafts: (sessionId, files) => {
+			created.push(files.length);
+			return files.map((entry, index) => {
+				const draft = { kind: 'image', id: `new-${index}`, file: entry };
+				registry.set(draft.id, draft);
+				return draft;
+			});
+		},
+		input: { for: () => rail },
+	};
+	const client = installClient({ conversation, sessions: { scope: () => ({}) } });
+	// Mirror what the button's effect does while the line still names the
+	// command: remember the live Files before a submission can consume them.
+	internals.commandImages.set(SESSION, [file]);
+	return { listeners: client.listeners, rail, created, added, file };
+}
+
+test('images: a successful claimed submission hands the pictures back to the rail', async () => {
+	const control = createFetchControl();
+	const harness = installClaimedRail();
+	try {
+		harness.listeners[0][1](SESSION, 'polish', { kind: 'success' });
+		await tick();
+		await new Promise((resolve) => setTimeout(resolve, 120));
+		// The rail kept the original and got the restored copy: the command
+		// consumed it, so re-registering is what preserves the user's picture.
+		assert.deepEqual(harness.created, [1]);
+		assert.deepEqual(harness.added, [['new-0']]);
+	} finally {
+		control.restore();
+		internals.dismiss(SESSION);
+	}
+});
+
+test('images: a failed claimed submission never registers the same picture twice', async () => {
+	const control = createFetchControl();
+	const harness = installClaimedRail();
+	try {
+		// Admission refused the image: the shipped transaction leaves the rail
+		// alone on failure, so restoring here would duplicate the picture.
+		harness.listeners[0][1](SESSION, 'polish', { kind: 'error', text: 'Image exceeds the configured byte limit.' });
+		await tick();
+		await new Promise((resolve) => setTimeout(resolve, 120));
+		assert.deepEqual(harness.created, []);
+		assert.deepEqual(harness.added, []);
+		assert.deepEqual(harness.rail.attachmentIds, ['id-1']);
+	} finally {
+		control.restore();
+		internals.dismiss(SESSION);
+	}
+});

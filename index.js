@@ -268,37 +268,62 @@ const IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'ima
  * Normalize the images the Client sent into the wire parts the attachment
  * service admits.
  *
- * The Client is untrusted input: a malformed part is dropped rather than
- * failing the whole request, because the user's text is still worth
- * translating. Every surviving part is still validated by the attachment
- * service itself (canonical base64, media type, byte and pixel limits), so
- * dropping here only narrows what reaches admission, it never bypasses it.
+ * The Client is untrusted input, so a part that is structurally unusable
+ * (unknown media type, no payload, not an object) is dropped rather than
+ * failing the request — but a dropped part is never silent: {@link imageParts}
+ * reports it, and the caller surfaces that to the user. Silently translating
+ * text while the user believes the model saw the picture is exactly the
+ * failure this feature exists to remove.
+ *
+ * Every surviving part is still validated by the attachment service itself
+ * (canonical base64, media type, byte and pixel limits), so filtering here only
+ * narrows what reaches admission, it never bypasses it.
  *
  * @param images - the request's `images` array, of unknown shape.
- * @returns encoded image parts ready for `admitPromptContent`.
+ * @returns the parts ready for `admitPromptContent`, and how many were dropped.
  */
 function imageParts(images) {
-	if (!Array.isArray(images)) return [];
+	if (!Array.isArray(images)) return { parts: [], dropped: 0 };
 	const parts = [];
+	let dropped = 0;
 	for (const image of images) {
-		if (image === null || typeof image !== 'object') continue;
+		if (image === null || typeof image !== 'object') {
+			dropped += 1;
+			continue;
+		}
 		const mediaType = typeof image.mediaType === 'string' ? image.mediaType : '';
 		const data = typeof image.data === 'string' ? image.data : '';
-		if (!IMAGE_MEDIA_TYPES.has(mediaType) || data === '') continue;
+		// An empty payload is the shape a zero-byte or unreadable file produces.
+		// Counting it as dropped is what turns it into a visible refusal instead
+		// of a translation that quietly ignored the picture.
+		if (!IMAGE_MEDIA_TYPES.has(mediaType) || data === '') {
+			dropped += 1;
+			continue;
+		}
 		const name = typeof image.name === 'string' && image.name !== '' ? image.name : undefined;
 		parts.push(name === undefined ? { type: 'image', mediaType, data } : { type: 'image', mediaType, data, name });
 	}
-	return parts;
+	return { parts, dropped };
 }
 
 /**
  * Whether one exact model route can accept image content.
  *
- * A route that declares no `inputModalities` is treated as image-capable: the
- * adapters document the field as advisory, and refusing on its absence would
- * turn a working model into a hard error. A route that declares modalities
- * without `image` is refused explicitly instead of silently dropping the
- * pictures the user attached.
+ * The answer mirrors what the shipped adapters actually do, which is **not**
+ * the same as "unknown means yes":
+ * - a route that declares modalities including `image` accepts images;
+ * - a route that declares modalities without `image` refuses them;
+ * - a route that declares no `inputModalities` is treated as unable to take
+ *   images, because the shipped adapters gate on exactly that field: the
+ *   DeepSeek adapter throws `UNSUPPORTED_CONTENT` unless the resolved model
+ *   lists `image`, and the pi-ai adapter does the same for
+ *   `model.input.includes('image')`. Pretending an unknown route supports
+ *   images would not make the request succeed — it would only turn this
+ *   plugin's clear `polish/no-vision` into a downstream `polish/llm-error`.
+ *
+ * A capability lookup that *fails* is different from one that reports no
+ * images: the failure says nothing about the route, so images are attempted
+ * and the adapter stays authoritative. That case keeps the user's pictures.
  *
  * @param ctx - Host plugin context carrying `llm`.
  * @param selection - the resolved provider/model route.
@@ -310,12 +335,13 @@ async function acceptsImages(ctx, selection, signal) {
 	try {
 		info = await ctx.llm.resolveModelInfo(selection.provider, selection.model, signal);
 	} catch {
-		// A capability lookup failure must not cost the user their images: let the
-		// request proceed and let the adapter report the authoritative refusal.
+		// The lookup itself failed: that is no evidence about the route, so let
+		// the model call decide. Losing the user's pictures to a transient lookup
+		// failure would be the worse error.
 		return true;
 	}
 	const modalities = info?.inputModalities;
-	if (!Array.isArray(modalities)) return true;
+	if (!Array.isArray(modalities)) return false;
 	return modalities.includes('image');
 }
 
@@ -412,10 +438,22 @@ function normalizeModelValue(value) {
  */
 async function translate(ctx, request, signal) {
 	const text = typeof request?.text === 'string' ? request.text.trim() : '';
-	const images = imageParts(request?.images);
+	const { parts: images, dropped } = imageParts(request?.images);
 	if (text === '') {
 		const error = new Error('先写点东西再触发转写');
 		error.code = 'polish/empty-input';
+		throw error;
+	}
+	// A picture the user attached but that cannot be represented is a refusal,
+	// not something to swallow: translating the text alone would show a prompt
+	// that silently ignores the image the user was asking about.
+	if (dropped > 0) {
+		const error = new Error(
+			dropped === 1
+				? '有一张图片无法读取（可能已损坏或类型不受支持），请重新添加后再试'
+				: `有 ${dropped} 张图片无法读取（可能已损坏或类型不受支持），请重新添加后再试`,
+		);
+		error.code = 'polish/bad-image';
 		throw error;
 	}
 
@@ -565,6 +603,32 @@ function tooLarge(cap) {
 }
 
 /**
+ * The effective body cap for one parsed payload.
+ *
+ * The plain-text cap covers text, transcript, feedback and JSON envelope. Each
+ * carried image legitimately adds its own base64 payload on top of that, so the
+ * allowance is the plain-text cap plus exactly what this request's images
+ * occupy. A request therefore cannot borrow headroom it does not use: one
+ * 96-byte picture buys 96 base64 bytes of room, not the whole image tier.
+ *
+ * The `MAX_BODY_BYTES` ceiling is enforced separately while reading, so this
+ * only ever narrows further.
+ *
+ * @param payload - the parsed request payload.
+ * @returns the cap in bytes for this request.
+ */
+function bodyCapFor(payload) {
+	const images = Array.isArray(payload?.images) ? payload.images : [];
+	let imageBytes = 0;
+	for (const image of images) {
+		// Count the payload as sent: an unusable part still arrived, and letting it
+		// inflate the allowance would reopen the same hole through a malformed body.
+		if (typeof image?.data === 'string') imageBytes += image.data.length;
+	}
+	return Math.min(MAX_TEXT_BODY_BYTES + imageBytes, MAX_BODY_BYTES);
+}
+
+/**
  * Serve one HTTP request on the plugin's own route.
  *
  * Authentication is the shipped predicate, not a hand-rolled one: the route is
@@ -612,11 +676,13 @@ async function handleHttp(ctx, req, res) {
 		return;
 	}
 
-	// A request carrying no image keeps the original tight cap, so a text-only
-	// client cannot push a multi-megabyte body through the image allowance.
-	if (imageParts(payload?.images).length === 0 && body.bytes > MAX_TEXT_BODY_BYTES) {
+	// The body cap grows with the pictures actually carried, not with the mere
+	// presence of one: a request's text and envelope may only exceed the
+	// plain-text cap by what its images legitimately occupy. Without this a
+	// single byte of image would buy a 300 MiB body.
+	if (body.bytes > bodyCapFor(payload)) {
 		settled = true;
-		sendJson(res, 413, tooLarge(MAX_TEXT_BODY_BYTES));
+		sendJson(res, 413, tooLarge(bodyCapFor(payload)));
 		return;
 	}
 

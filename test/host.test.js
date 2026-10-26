@@ -152,7 +152,10 @@ function createHost(options = {}) {
 					provider,
 					id: model,
 					name: model,
-					...(options.modalities === undefined ? {} : { inputModalities: options.modalities }),
+					// The shipped adapters always answer with this field. The default
+					// mirrors a vision-capable route so per-test cases only state the
+					// capability they are actually about; pass `modalities` to override.
+					inputModalities: options.modalities ?? ['text', 'image'],
 				};
 			},
 			stream(llmOptions) {
@@ -588,18 +591,33 @@ test('images: a text-only request never touches the attachment service', async (
 	);
 });
 
-test('images: malformed parts are dropped instead of failing the translation', async () => {
+test('images: an unusable picture is refused instead of silently dropped', async () => {
 	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
 	const envelope = await translate(host, {
 		text: '写个登录页',
 		images: [imagePart({ mediaType: 'image/svg+xml' }), imagePart({ data: '' }), null, 'nope', imagePart()],
 	});
-	assert.equal(envelope.ok, true);
-	// Only the one well-formed picture is admitted.
-	assert.deepEqual(
-		host.admissions[0].map((part) => part.mediaType),
-		['image/png'],
-	);
+	// Translating the text alone while the user believes the model saw the picture
+	// is the exact failure this feature exists to remove.
+	assert.equal(envelope.error.code, 'polish/bad-image');
+	assert.match(envelope.error.message, /4 张图片无法读取/);
+	assert.equal(host.llmCalls.length, 0);
+	assert.equal(host.admissions.length, 0);
+});
+
+test('images: one unusable picture among valid ones is still refused', async () => {
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	const envelope = await translate(host, { text: '照这张图改', images: [imagePart(), imagePart({ data: '' })] });
+	assert.equal(envelope.error.code, 'polish/bad-image');
+	assert.match(envelope.error.message, /有一张图片无法读取/);
+	assert.equal(host.llmCalls.length, 0);
+});
+
+test('images: a zero-byte file is refused, not treated as no picture', async () => {
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	const envelope = await translate(host, { text: '看图说明一下', images: [{ mediaType: 'image/png', data: '' }] });
+	assert.equal(envelope.error.code, 'polish/bad-image');
+	assert.equal(host.llmCalls.length, 0);
 });
 
 test('images: a model without image input maps to polish/no-vision and spends nothing', async () => {
@@ -610,11 +628,15 @@ test('images: a model without image input maps to polish/no-vision and spends no
 	assert.equal(host.admissions.length, 0);
 });
 
-test('images: a route that declares no modalities is treated as image-capable', async () => {
+test('images: a route that declares no modalities is treated as unable to take images', async () => {
+	// The shipped adapters gate on this exact field, so "unknown" must not be
+	// read as "capable": doing so only turns this clear refusal into a
+	// downstream llm-error.
 	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	host.ctx.llm.resolveModelInfo = async (provider, model) => ({ provider, id: model, name: model });
 	const envelope = await translate(host, { text: '照这张图改', images: [imagePart()] });
-	assert.equal(envelope.ok, true);
-	assert.equal(host.llmCalls.length, 1);
+	assert.equal(envelope.error.code, 'polish/no-vision');
+	assert.equal(host.llmCalls.length, 0);
 });
 
 test('images: a capability lookup failure does not cost the user their pictures', async () => {
@@ -644,13 +666,52 @@ test('images: a request carrying no image keeps the tight 64 KiB cap', async () 
 	assert.match(JSON.parse(res.body).error.message, /65536/);
 });
 
-test('images: an image request may exceed the text cap', async () => {
+test('images: an image request may exceed the text cap by the bytes its pictures occupy', async () => {
 	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
-	// A payload well over 64 KiB, but still one legal image request.
+	// A payload well over 64 KiB, but still one legal image request: the image
+	// itself is what makes it legitimate.
 	const body = JSON.stringify({ text: '照这张图改', images: [imagePart({ data: `${PNG_BASE64}${'A'.repeat(80_000)}` })] });
 	const res = await callRoute(host, { body });
 	assert.equal(res.status, 200);
 	assert.equal(JSON.parse(res.body).ok, true);
+});
+
+test('images: one tiny picture cannot buy the whole image tier', async () => {
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	// 96 bytes of image must not license megabytes of unrelated body.
+	const body = JSON.stringify({ text: '照这张图改', feedback: 'y'.repeat(2 * 1024 * 1024), images: [imagePart()] });
+	const res = await callRoute(host, { body });
+	assert.equal(res.status, 413);
+	assert.equal(host.llmCalls.length, 0);
+});
+
+test('images: a malformed image payload cannot inflate the body allowance', async () => {
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	// An unusable media type still occupies bytes, so it counts against the cap
+	// rather than being an unmetered way to carry a large body; the request is
+	// accepted only within its own payload's size and then refused as an image.
+	const body = JSON.stringify({
+		text: 'x',
+		images: [{ mediaType: 'image/svg+xml', data: 'A'.repeat(2 * 1024 * 1024) }],
+	});
+	const res = await callRoute(host, { body });
+	assert.equal(res.status, 200);
+	assert.equal(JSON.parse(res.body).error.code, 'polish/bad-image');
+	assert.equal(host.llmCalls.length, 0);
+});
+
+test('images: a malformed image payload does not license extra body beyond its own bytes', async () => {
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	// 1 MiB of unusable image data plus 2 MiB of unrelated body exceeds
+	// 64 KiB + 1 MiB, which is all that payload is allowed to occupy.
+	const body = JSON.stringify({
+		text: 'x',
+		feedback: 'y'.repeat(2 * 1024 * 1024),
+		images: [{ mediaType: 'image/svg+xml', data: 'A'.repeat(1024 * 1024) }],
+	});
+	const res = await callRoute(host, { body });
+	assert.equal(res.status, 413);
+	assert.equal(host.llmCalls.length, 0);
 });
 
 test('images: the command declares attachment acceptance so the composer lets them through', () => {

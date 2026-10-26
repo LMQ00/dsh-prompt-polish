@@ -1011,15 +1011,19 @@ window.__ModuleLoader__.load({
 				);
 			});
 
-			ctx.on('command/executed', (sessionId, commandName) => {
+			ctx.on('command/executed', (sessionId, commandName, result) => {
 				if (commandName !== COMMAND) return;
 				const line = commandLines.get(sessionId) ?? '';
 				commandLines.delete(sessionId);
 				const files = commandImages.get(sessionId) ?? [];
 				commandImages.delete(sessionId);
-				// A claiming submission released the rail; hand the pictures back so
-				// the user keeps them alongside the polished prompt.
-				restoreDraftImages(ctx, sessionId, files);
+				// Only a *successful* submission consumes the composer's pictures: the
+				// shipped submit transaction clears the rail and releases the
+				// attachments on success alone. Restoring on a failed submission would
+				// register the same File a second time, so the user would see the
+				// picture twice. On failure the rail still holds the originals, which
+				// is exactly what the user needs to correct and retry.
+				if (result?.kind !== 'error') restoreDraftImages(ctx, sessionId, files);
 				start(ctx, sessionId, stripCommand(line), files);
 			});
 		}
@@ -1047,6 +1051,7 @@ window.__ModuleLoader__.load({
 				imageDraftsOf,
 				encodeImageFiles,
 				rememberCommandImages,
+				commandImages,
 				run,
 				start,
 				translateWith,

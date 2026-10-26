@@ -93,9 +93,9 @@
   | `POST /polish/nope` | `405`（fallback 对 POST 的方法处理，**不是 404**） |
 
   所以「路由是否真的挂上」要看 `/polish/translate` 得 401、`/polish/nope` 得 404/405，两者不是同一个数。
-- 请求体上限分两档：**不带图片**时 64 KiB（`MAX_TEXT_BODY_BYTES`）；**带图片**时 300 MiB（`MAX_BODY_BYTES`，覆盖 base64 膨胀与部署的 `maxMessageImageBytes`）。超限 413；非 POST → 405；非 JSON → 400。两档都按解析后的请求内容判定，因此文本请求不可能借图片额度塞进大 body。
+- 请求体上限：`64 KiB + 本次请求图片的实际 base64 字节数`，硬上限 300 MiB（`MAX_BODY_BYTES`）。额度随**图片实际体积**增长，而不是「有图就放开」——一张 96 字节的图只换来 96 字节额度，不能借它塞进几 MB 的文本。畸形图片的 `data` 同样计入额度，所以畸形载荷也不是免费通道。超限 413；非 POST → 405；非 JSON → 400。
 - 请求：`{ sessionId?: string, text: string, transcript: [{ questions, answers }], rounds?: number, feedback: string, images?: [{ mediaType, data, name? }] }`。
-- `images` 是**可选**的输入框图片：`mediaType` 取 `image/png|jpeg|webp|gif`，`data` 是**不带 data-URL 前缀**的标准 base64，`name` 可选。畸形的图片项（未知类型、空 `data`、非对象）会被丢弃而不是让整次转写失败——用户的文本仍然值得转写；存活下来的每一项仍要过附件服务自己的完整校验（base64 规范性、字节数、像素数、张数）。
+- `images` 是**可选**的输入框图片：`mediaType` 取 `image/png|jpeg|webp|gif`，`data` 是**不带 data-URL 前缀**的标准 base64，`name` 可选。任何一项不可用（未知类型、空 `data`、非对象，例如 0 字节或损坏的文件）都会让整次请求以 `polish/bad-image` 失败，**不会**静默丢弃——「用户以为模型看了图、实际只转了文字」正是这个功能要消除的失败。存活下来的每一项还要过附件服务自己的完整校验（base64 规范性、字节数、像素数、张数），那里的拒绝同样映射为 `polish/bad-image`。
 - `rounds` 是**本次尝试已花掉的追问轮次**，由 Client 报上来（Host 用它决定是否写「问满轮次，别再问」）。缺省时回退到 `transcript.length`。
 - `sessionId` 只用于**读**该会话最近的消息作为消歧上下文（见下）；缺失或读取失败一律降级为「无上下文」，不影响转写。
 - 图片的落盘由 `ctx.attachments.admitPromptContent()` 负责：Host 只把 `ImageAttachmentRef` 塞进 `ctx.llm` 的消息，自己不碰字节，也不调用任何 fs 接口。
@@ -130,8 +130,8 @@
 | `polish/aborted` | 调用方中止（关浮层、换会话） | 不显示（已静默关闭） | — |
 | `polish/transport-error` | Client 侧 HTTP 非 2xx，或 fetch 本身失败 | 转写接口返回 HTTP xxx / 传输错误原文 | 是 |
 | `polish/bad-request` | 请求体不是 JSON，或超过当前档位的上限 | 请求体不是合法 JSON / 超过 N 字节 | — |
-| `polish/no-vision` | 请求带图片，而当前默认模型声明了 `inputModalities` 且不含 `image` | 当前模型（xxx）不支持图片输入，请换一个支持图片的模型，或先从输入框移除图片 | 换模型后可重试 |
-| `polish/bad-image` | 图片准入被附件服务拒绝（超字节/像素/张数上限等），**保留服务自己给的原因** | 服务原文 | 换图或缩小后可重试 |
+| `polish/no-vision` | 请求带图片，而当前默认模型没有声明支持 `image`（含 `inputModalities` 缺失） | 当前模型（xxx）不支持图片输入，请换一个支持图片的模型，或先从输入框移除图片 | 换模型后可重试 |
+| `polish/bad-image` | 图片不可用：结构不可读（未知类型/空 `data`/0 字节）或附件准入被拒（超字节/像素/张数上限），后者**保留服务自己给的原因** | 不可读时给出中文说明；准入拒绝时为服务原文 | 换图或缩小后可重试 |
 | `polish/round-limit` | 已问满 `MAX_ROUNDS` 轮，模型仍返回 `questions`（**Client 侧硬拦截**） | 已经问满 3 轮澄清，模型仍在追问。重试会让它直接出稿。 | 是（重试保留 transcript，Host 随即要求模型直接出稿） |
 
 所有错误都不清空用户已输入的粗糙文本。
