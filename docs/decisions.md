@@ -38,7 +38,7 @@
 | 重试语义 | 只带反馈重试 | 用户选定；「不满意」需填一句理由，理由进下一轮请求 |
 | 写入方式 | 整段替换 + 聚焦 | 用户选定；符合「我认可了再发送」 |
 | 输出语言 | 跟输入语言，术语保留英文 | 用户选定 |
-| 模型 | 默认跟随当前会话默认模型，Config 可覆盖 | 用户选定；既不突兀又能兜底 |
+| 模型 | 跟随**当前会话的模型**（会话切换即生效），无会话记录时用部署默认兜底；v1 无 Config | 用户选定；既不突兀又能兜底 |
 | 生成历史 | 不保留 | 与「不进会话历史」一致 |
 | 源码位置 | 仓库根目录 | 用户原话「源码放根目录，就是给这个项目用的」 |
 | 临时文件 | 只放 `tmp/` | 用户指定的开发规范 |
@@ -50,6 +50,9 @@
 | 不可读图片 | 整次拒绝（`polish/bad-image`），不静默丢图 | 「用户以为模型看了图、实际只转了文字」正是本功能要消除的失败；先前的静默丢弃经审查判定为缺陷 |
 | body 额度 | `64 KiB + 本次图片实际 base64 字节` | 「有图就放开到 300 MiB」会让一张 96 字节的图换来整档额度，是审查发现的资源放大漏洞 |
 | 未知模型模态 | 视为**不支持图片** | 上游适配器就是按 `inputModalities` gate（缺该字段即抛 `UNSUPPORTED_CONTENT`），放行只会把清晰拒绝变成下游 `llm-error` |
+| 转写不带 `reasoningEffort` | 只取会话的 provider/model，effort 交适配器默认 | 转写是一次短改写，不是会话里的一步：借用户的 effort 会白等推理，而且任何未声明 `reasoning` 的模型都会被 `dsh-llm` 以 `UNSUPPORTED_REASONING_EFFORT` 直接拒绝 |
+| 模型解析来源 | live Agent → 会话 `modelSelection` 投影 → 部署默认 | 只有这样才能让「判定能不能看图」和「真正派发」指向同一个模型；用户环境里默认模型是 `deepseek-flash`（文本）、会话选的是视觉模型，旧实现因此误报 `polish/no-vision` |
+| `agents` 不进 `inject` | 用 `ctx.get('agents')` 软取 | 没挂 agent registry 的部署必须仍能加载本插件；取不到就落到投影与默认 |
 
 ## 被否决的方案
 
@@ -71,6 +74,7 @@
 | 让用户手动把图片重新拖进来 | 用户的诉求就是别让他重复劳动 |
 | 调用桥用 `ctx.remote.commands.execute` 执行 `/polish`，拿命令结果回传 | 命令结果会进 `command/done`，等于把规范提示词写进会话日志，违反产品边界；且命令 handler 跑在 Host，拿不到输入框 |
 | 调用桥用 Typert 生成的 `ctx.remote.*` 命名空间 | 需要生成产物与构建步骤；本仓库是普通 JS、无构建 |
+| 继续用 `ctx.agentDefaultModel.currentSelection()` 决定转写模型 | 那是**全局默认**，与会话选择会分叉（configEditor 被 home patch 覆盖时 `saveSelection` 直接失败，默认永远停在启动时的值）；判定与派发必须同源 |
 | 浮层可编辑 | 用户选定只读；重试必须带反馈 |
 | v1 就声明 Config | 声明 Config 要 import schema 库；workspace 包的模块解析路径与 profile 安装包不同，先保证能加载，Config 延后 |
 
@@ -79,7 +83,7 @@
 | 决策 | 选择 | 理由 |
 | --- | --- | --- |
 | 调用桥 | 插件自有 HTTP 路由：Host `ctx.webServer.register({kind:'exact', path:'/polish/translate'})`，Client 普通 `fetch` | 不需要代码生成；走 HTTP，不落会话日志；认证复用 `ctx.connection.requestRejection` |
-| Host `inject` | `['commands','llm','agentDefaultModel','connection','webServer','sessionQuery']` | 路由挂在 `webServer`；`connection` 只用来取认证判定；`sessionQuery` 只读上下文 |
+| Host `inject` | `['commands','llm','agentDefaultModel','connection','webServer','sessionQuery','attachments']` | 路由挂在 `webServer`；`connection` 只用来取认证判定；`sessionQuery` 只读上下文与会话记录的模型；`attachments` 是图片准入；`agents` 软取，见上表 |
 | 为什么不用 `ctx.connection.rpc.handle` | **实测不可用**：`handle` 把路由挂在 connection 服务自己的 ctx 上（`register(this.ctx, …)`），该 ctx 的 inject 只有 `credentials` + `webRuntime`，不含 `webServer`，任何调用方都撞 `cannot get property "webServer" without inject`；给本插件加 `webServer` 无效，因为 owner 不是本插件 | 上游问题，不是配置错误 |
 | 为什么不用 `rpc.intercept('/api', …)` | API Gateway 已占 `/api` 的唯一 interceptor，第二个注册直接抛错 | — |
 | `/polish` 命令的角色 | 只做「可见性 + 触发信号」：`recordInput: false`，handler 返回 `{kind:'success'}` 不带 text | 让命令记录行里既没有粗糙文本也没有规范提示词 |

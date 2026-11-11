@@ -37,13 +37,18 @@
 export const name = 'polish';
 
 /**
- * `commands` is what makes `/polish` discoverable, and `llm` plus
- * `agentDefaultModel` are what make the translation possible at all.
- * `webServer` hosts the plugin's own route; `connection` supplies the browser
- * trust and authentication predicate for it; `sessionQuery` is how the recent
- * conversation is read so a translation can resolve what "这个" refers to.
- * `attachments` is the durable admission path every image must cross before a
- * model adapter can read its bytes.
+ * `commands` is what makes `/polish` discoverable, and `llm` is what makes the
+ * translation possible at all. `webServer` hosts the plugin's own route;
+ * `connection` supplies the browser trust and authentication predicate for it;
+ * `sessionQuery` is one durable read that yields both the recent conversation
+ * (so a translation can resolve what "这个" refers to) and the model the
+ * Session recorded. `agentDefaultModel` is only the last-resort route for a
+ * Session that has recorded none. `attachments` is the durable admission path
+ * every image must cross before a model adapter can read its bytes.
+ *
+ * `agents` is deliberately absent: it is read through `ctx.get` so a deployment
+ * that mounts no agent registry still loads this plugin. See
+ * {@link resolveSelection}.
  */
 export const inject = [
 	'commands',
@@ -177,52 +182,6 @@ function contextLine(event) {
 }
 
 /**
- * Read the tail of one Session's conversation as plain text.
- *
- * Read-only by construction: the observation is a snapshot of the durable log,
- * and nothing here writes an event, so the boundary in docs/decisions.md (never
- * append to the session) still holds. Context exists only to resolve what the
- * rough request refers to — "这个登录页" is meaningless without it.
- *
- * Any failure degrades to "no context" rather than failing the translation: a
- * blank Session, a cold or unreadable log, or an absent query service must not
- * cost the user their request.
- *
- * @param ctx - Host plugin context carrying `sessionQuery`.
- * @param sessionId - the Session the request came from, when known.
- * @param signal - cancellation for this request.
- * @returns the recent conversation as labelled lines, or an empty string.
- */
-async function recentContext(ctx, sessionId, signal) {
-	if (typeof sessionId !== 'string' || sessionId === '') return '';
-	let observation;
-	try {
-		observation = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none', signal });
-	} catch {
-		return '';
-	}
-	try {
-		const events = Array.isArray(observation?.events) ? observation.events : [];
-		const lines = [];
-		for (const event of events) {
-			const line = contextLine(event);
-			if (line !== undefined) lines.push(line);
-		}
-		const tail = lines.slice(-MAX_CONTEXT_MESSAGES).join('\n');
-		if (tail === '') return '';
-		return tail.length > MAX_CONTEXT_CHARS ? `…${tail.slice(tail.length - MAX_CONTEXT_CHARS)}` : tail;
-	} catch {
-		return '';
-	} finally {
-		try {
-			observation?.[Symbol.dispose]?.();
-		} catch {
-			/* a leaked observation lease is not worth failing the request over */
-		}
-	}
-}
-
-/**
  * Render the user turn for one translation request.
  * @param request - rough text, clarification transcript, retry feedback, read-only context, and the rounds this attempt has spent.
  * @returns the complete user message text.
@@ -304,6 +263,132 @@ function imageParts(images) {
 		parts.push(name === undefined ? { type: 'image', mediaType, data } : { type: 'image', mediaType, data, name });
 	}
 	return { parts, dropped };
+}
+
+/**
+ * Detach one trustworthy `{ provider, model }` from a value that may come from
+ * a projection, an Agent, or a composition default.
+ *
+ * Every source is untrusted shape-wise: a projection is durable JSON that an
+ * older build wrote, and an Agent's options may carry an empty string. A
+ * selection missing either half is not a route, so it is dropped and the
+ * caller moves on to its next source instead of failing the request.
+ *
+ * The recorded `reasoningEffort` is deliberately dropped. It belongs to the
+ * user's conversation, where deep thinking is the point; this is one short
+ * rewrite, and spending the session's effort on it would make the overlay wait
+ * for reasoning nobody asked for. Omitting it lets the adapter apply the
+ * model's own default, which is the behaviour this plugin has always had.
+ *
+ * @param value - the candidate selection.
+ * @returns the usable route, or undefined.
+ */
+function usableSelection(value) {
+	if (value === null || typeof value !== 'object') return undefined;
+	const { provider, model } = value;
+	if (typeof provider !== 'string' || provider === '') return undefined;
+	if (typeof model !== 'string' || model === '') return undefined;
+	return { provider, model };
+}
+
+/**
+ * The route the Session's own Agent will use for its next step.
+ *
+ * This is the authoritative answer while a Session is open: `AgentModel.current()`
+ * folds the durable `model/selection` event, so a model the user picked in the
+ * composer's selector is visible here immediately — before any request has been
+ * sent with it. `agents` is read through `ctx.get` because it is not in this
+ * plugin's `inject` list: a deployment that mounts no agent registry must still
+ * load this plugin, and the resolver has two more sources behind this one.
+ *
+ * @param ctx - Host plugin context.
+ * @param sessionId - the Session the request came from.
+ * @returns the live selection, or undefined when there is no live Agent or it has no route.
+ */
+function liveSelection(ctx, sessionId) {
+	if (typeof sessionId !== 'string' || sessionId === '') return undefined;
+	try {
+		return usableSelection(ctx.get('agents')?.get?.(sessionId)?.model?.current?.());
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Read one Session's tail and its recorded model selection in a single
+ * observation.
+ *
+ * Reading both in one observation is what keeps the Host at one durable read
+ * per translation: the conversation tail is needed for disambiguation and the
+ * `modelSelection` projection is needed to answer which model this Session is
+ * talking to. The projection's wire view is `{ lastUsed, next }`, where `next`
+ * folds a selection the log recorded but no request has consumed yet — the
+ * same value the composer's selector displays. Only a Session with no live
+ * Agent needs it, and the observation is read for any Session anyway.
+ *
+ * Read-only by construction: the observation is a snapshot of the durable log,
+ * and nothing here writes an event, so the boundary in docs/decisions.md (never
+ * append to the session) still holds. Any failure degrades to "no context, no
+ * recorded selection": a blank Session, a cold or unreadable log, or an absent
+ * query service must not cost the user their request.
+ *
+ * @param ctx - Host plugin context carrying `sessionQuery`.
+ * @param sessionId - the Session the request came from, when known.
+ * @param signal - cancellation for this read.
+ * @returns the recent conversation as labelled lines, and the recorded selection when the log has one.
+ */
+async function sessionTail(ctx, sessionId, signal) {
+	if (typeof sessionId !== 'string' || sessionId === '') return { context: '', selection: undefined };
+	let observation;
+	try {
+		observation = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'all', signal });
+	} catch {
+		return { context: '', selection: undefined };
+	}
+	try {
+		const events = Array.isArray(observation?.events) ? observation.events : [];
+		const lines = [];
+		for (const event of events) {
+			const line = contextLine(event);
+			if (line !== undefined) lines.push(line);
+		}
+		const tail = lines.slice(-MAX_CONTEXT_MESSAGES).join('\n');
+		const projection = observation?.projections?.values?.modelSelection;
+		return {
+			context: tail === '' ? '' : tail.length > MAX_CONTEXT_CHARS ? `…${tail.slice(tail.length - MAX_CONTEXT_CHARS)}` : tail,
+			selection: usableSelection(projection?.next) ?? usableSelection(projection?.lastUsed),
+		};
+	} catch {
+		return { context: '', selection: undefined };
+	} finally {
+		try {
+			observation?.[Symbol.dispose]?.();
+		} catch {
+			/* a leaked observation lease is not worth failing the request over */
+		}
+	}
+}
+
+/**
+ * Resolve the model route this translation must run on.
+ *
+ * The rule is "the model the user is actually talking to", not "the deployment
+ * default": a Session that switched to a vision model in the composer's
+ * selector must translate on that vision model, and reporting a capability
+ * verdict about any *other* route is how the plugin used to tell a user with a
+ * vision model that their model cannot see pictures.
+ *
+ * Order: live Agent → the Session's durable selection → composition default.
+ * The default stays last so a blank Session with no recorded selection still
+ * translates.
+ *
+ * @param ctx - Host plugin context carrying `agents` and `agentDefaultModel`.
+ * @param sessionId - the Session the request came from, when known.
+ * @param recorded - selection read from that Session's log, when it has one.
+ * @returns the selection, or undefined when nothing names a route.
+ */
+function resolveSelection(ctx, sessionId, recorded) {
+	return liveSelection(ctx, sessionId) ?? recorded ?? usableSelection(ctx.agentDefaultModel.currentSelection());
 }
 
 /**
@@ -428,10 +513,11 @@ function normalizeModelValue(value) {
 /**
  * Run one translation call against the shared LLM service.
  *
- * Nothing here is session-scoped: the request carries no `sessionId` and no
- * `purpose`, so the call cannot land in any session's history.
+ * The model route is the Session's own route (see {@link resolveSelection}),
+ * and nothing here is session-scoped on the wire: the call carries no
+ * `sessionId` and no `purpose`, so it cannot land in any session's history.
  *
- * @param ctx - Host plugin context carrying `llm`, `agentDefaultModel`, and `attachments`.
+ * @param ctx - Host plugin context carrying `llm`, `agents`, `sessionQuery`, `agentDefaultModel`, and `attachments`.
  * @param request - rough text plus optional transcript, feedback, and images.
  * @param signal - caller cancellation from the RPC invocation.
  * @returns the translation value.
@@ -457,24 +543,27 @@ async function translate(ctx, request, signal) {
 		throw error;
 	}
 
-	const selection = ctx.agentDefaultModel.currentSelection();
+	const deadline = AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]);
+	// One durable read per translation: it carries both the disambiguating
+	// context and the Session's recorded model, so the image-capability verdict
+	// is about the model the user is actually talking to.
+	const tail = await sessionTail(ctx, request?.sessionId, deadline);
+	const selection = resolveSelection(ctx, request?.sessionId, tail.selection);
 	const provider = selection?.provider;
 	const model = selection?.model;
 	if (typeof provider !== 'string' || provider === '' || typeof model !== 'string' || model === '') {
-		const error = new Error('当前没有可用的默认模型，请先在设置里选一个模型');
+		const error = new Error('当前没有可用的模型，请先在输入框的模型选择器里选一个模型');
 		error.code = 'polish/no-model';
 		throw error;
 	}
 
-	const deadline = AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]);
 	if (images.length > 0 && !(await acceptsImages(ctx, selection, deadline))) {
 		const error = new Error(`当前模型（${model}）不支持图片输入，请换一个支持图片的模型，或先从输入框移除图片`);
 		error.code = 'polish/no-vision';
 		throw error;
 	}
 
-	const context = await recentContext(ctx, request?.sessionId, deadline);
-	const prompt = userPrompt({ ...request, text, context });
+	const prompt = userPrompt({ ...request, text, context: tail.context });
 	let content;
 	try {
 		content = await userContent(ctx, prompt, images);

@@ -89,9 +89,12 @@ function makeResponse() {
  *
  * The context carries exactly the seven Services the plugin injects, plus
  * `effect`. Nothing else exists, so a translation that quietly reached for
- * `agentLoop`, a filesystem, or a session append would fail here.
+ * `agentLoop`, a filesystem, or a session append would fail here. `agents` is
+ * the one optional read: it is reached through `ctx.get`, so it is absent
+ * unless a test provides it — which is exactly the deployment shape the
+ * resolver has to survive.
  *
- * @param options - per-test knobs: rejection, model selection, observation, gate, respond, modalities, admission.
+ * @param options - per-test knobs: rejection, model selection, live agents, observation, gate, respond, modalities, admission.
  * @returns the fake context and the captured registrations.
  */
 function createHost(options = {}) {
@@ -100,10 +103,18 @@ function createHost(options = {}) {
 	const llmCalls = [];
 	const observed = [];
 	const admissions = [];
+	const liveAgents = options.agents ?? new Map();
 	const ctx = {
 		effect(callback) {
 			callback();
 			return () => {};
+		},
+		get(name) {
+			// A deployment with no agent registry has no `agents` Service at all,
+			// which is the shape most cases here run in: the resolver must work
+			// from the Session log and the default alone.
+			if (name !== 'agents' || options.agents === undefined) return undefined;
+			return { get: (sessionId) => liveAgents.get(sessionId) };
 		},
 		commands: {
 			register(definition) {
@@ -469,7 +480,9 @@ test('context: only user and assistant text blocks become context lines', async 
 	assert.match(prompt, /助手：第一答/);
 	assert.doesNotMatch(prompt, /bash/);
 	assert.equal(host.observed[0].sessionId, 'session-1');
-	assert.equal(host.observed[0].options.projectionMode, 'none');
+	// One read carries both the disambiguating tail and the Session's recorded
+	// model, so the projection has to be requested rather than skipped.
+	assert.equal(host.observed[0].options.projectionMode, 'all');
 	assert.ok(host.observed[0].options.signal instanceof AbortSignal);
 });
 
@@ -546,6 +559,197 @@ test('boundaries: the Host half touches no session writer and no filesystem', as
 	const envelope = await translate(host, { text: 'x' });
 	assert.equal(envelope.ok, true);
 	assert.doesNotMatch(SOURCE, /\b(writeFile|appendFile|createWriteStream|mkdirSync|unlinkSync)\b/);
+});
+
+// ── model routing ────────────────────────────────────────────────────────────
+
+/**
+ * Build one live-Agent double whose `model.current()` reports the Session route.
+ * @param selection - the selection the Agent will use for its next step.
+ * @returns the Agent double.
+ */
+function liveAgent(selection) {
+	return { model: { current: () => selection } };
+}
+
+/**
+ * Build one all-projections observation carrying a recorded model selection.
+ * @param selection - the projection's `next`/`lastUsed` value.
+ * @param events - raw events for the context tail.
+ * @returns the observation double.
+ */
+function modelObservation(selection, events = []) {
+	return {
+		events,
+		projections: { values: { modelSelection: { lastUsed: selection, next: selection } } },
+		[Symbol.dispose]() {},
+	};
+}
+
+test('model: the translation runs on the live Agent route, not the deployment default', async () => {
+	// The reported failure: a Session on a vision model was told its model cannot
+	// take pictures, because the verdict was about the *default* route instead.
+	const agents = new Map([['session-1', liveAgent({ provider: 'session-provider', model: 'session-model' })]]);
+	const host = createHost({ agents, respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	const envelope = await translate(host, { sessionId: 'session-1', text: 'x' });
+	assert.equal(envelope.ok, true);
+	assert.equal(host.llmCalls[0].provider, 'session-provider');
+	assert.equal(host.llmCalls[0].model, 'session-model');
+});
+
+test('model: a Session on a vision model accepts pictures even when the default route cannot', async () => {
+	// Capability is answered about the route the request is dispatched to, so the
+	// verdict and the call can never disagree.
+	const agents = new Map([['session-1', liveAgent({ provider: 'session-provider', model: 'session-model' })]]);
+	const probed = [];
+	const host = createHost({ agents, selection: { provider: 'default-provider', model: 'default-model' } });
+	host.ctx.llm.resolveModelInfo = async (provider, model) => {
+		probed.push(`${provider}/${model}`);
+		return {
+			provider,
+			id: model,
+			name: model,
+			inputModalities: model === 'default-model' ? ['text'] : ['text', 'image'],
+		};
+	};
+	host.ctx.llm.stream = (llmOptions) => {
+		host.llmCalls.push(llmOptions);
+		return (async function* fakeStream() {
+			yield* textChunks('{"kind":"prompt","prompt":"P"}');
+		})();
+	};
+	const envelope = await translate(host, { sessionId: 'session-1', text: '照这张图改', images: [imagePart()] });
+	assert.equal(envelope.ok, true);
+	assert.deepEqual(probed, ['session-provider/session-model']);
+	assert.equal(host.llmCalls[0].model, 'session-model');
+});
+
+test('model: a Session without image support is refused by name, and nothing is dispatched', async () => {
+	const agents = new Map([['session-1', liveAgent({ provider: 'session-provider', model: 'session-model' })]]);
+	const host = createHost({ agents, modalities: ['text'], respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	const envelope = await translate(host, { sessionId: 'session-1', text: '照这张图改', images: [imagePart()] });
+	assert.equal(envelope.error.code, 'polish/no-vision');
+	assert.match(envelope.error.message, /session-model/, 'the refusal names the model the request was about');
+	assert.equal(host.llmCalls.length, 0);
+	assert.equal(host.admissions.length, 0);
+});
+
+test('model: a closed Session falls back to the model its log recorded', async () => {
+	const host = createHost({
+		respond: () => textChunks('{"kind":"prompt","prompt":"P"}'),
+		observation: modelObservation({ provider: 'recorded-provider', model: 'recorded-model' }),
+	});
+	await translate(host, { sessionId: 'session-1', text: 'x' });
+	assert.equal(host.observed[0].options.projectionMode, 'all', 'the projection is what carries the selection');
+	assert.equal(host.llmCalls[0].provider, 'recorded-provider');
+	assert.equal(host.llmCalls[0].model, 'recorded-model');
+});
+
+test('model: a recorded selection the log has not used yet still wins over the last used one', async () => {
+	// The composer's selector shows `next`; the user picks a model and runs
+	// `/polish` before any request has consumed that choice. Answering with
+	// `lastUsed` would report a verdict about the model the user just left.
+	const host = createHost({
+		respond: () => textChunks('{"kind":"prompt","prompt":"P"}'),
+		observation: {
+			events: [],
+			projections: {
+				values: {
+					modelSelection: {
+						lastUsed: { provider: 'old-provider', model: 'old-model' },
+						next: { provider: 'new-provider', model: 'new-model' },
+					},
+				},
+			},
+			[Symbol.dispose]() {},
+		},
+	});
+	await translate(host, { sessionId: 'session-1', text: 'x' });
+	assert.equal(host.llmCalls[0].provider, 'new-provider');
+	assert.equal(host.llmCalls[0].model, 'new-model');
+});
+
+test('model: the live Agent route wins over the recorded selection', async () => {
+	const agents = new Map([['session-1', liveAgent({ provider: 'live-provider', model: 'live-model' })]]);
+	const host = createHost({
+		agents,
+		respond: () => textChunks('{"kind":"prompt","prompt":"P"}'),
+		observation: modelObservation({ provider: 'recorded-provider', model: 'recorded-model' }),
+	});
+	await translate(host, { sessionId: 'session-1', text: 'x' });
+	assert.equal(host.llmCalls[0].provider, 'live-provider');
+	assert.equal(host.llmCalls[0].model, 'live-model');
+});
+
+test('model: a blank Session with no recorded selection still uses the composition default', async () => {
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	await translate(host, { sessionId: 'session-1', text: 'x' });
+	assert.equal(host.llmCalls[0].provider, 'test-provider');
+	assert.equal(host.llmCalls[0].model, 'test-model');
+});
+
+test('model: the route is taken from the Session but its reasoning effort is not', async () => {
+	// The route matters; the effort does not. This is one short rewrite, not a
+	// conversation turn, and forwarding the session's effort would both spend
+	// reasoning nobody asked for and break any route that declares no levels
+	// (the LLM service rejects a requested effort with UNSUPPORTED_REASONING_EFFORT).
+	const agents = new Map([
+		['session-1', liveAgent({ provider: 'session-provider', model: 'session-model', reasoningEffort: 'max' })],
+	]);
+	const host = createHost({ agents, respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	const envelope = await translate(host, { sessionId: 'session-1', text: 'x' });
+	assert.equal(envelope.ok, true);
+	assert.equal(host.llmCalls[0].provider, 'session-provider');
+	assert.equal(host.llmCalls[0].reasoningEffort, undefined);
+});
+
+test('model: an unusable Agent selection falls through to the next source', async () => {
+	// A projection or an Agent may carry an empty string; it is not a route and
+	// must not become a model call against provider "".
+	const agents = new Map([['session-1', liveAgent({ provider: '', model: 'session-model' })]]);
+	const host = createHost({
+		agents,
+		respond: () => textChunks('{"kind":"prompt","prompt":"P"}'),
+		observation: modelObservation({ provider: 'recorded-provider', model: 'recorded-model' }),
+	});
+	await translate(host, { sessionId: 'session-1', text: 'x' });
+	assert.equal(host.llmCalls[0].provider, 'recorded-provider');
+});
+
+test('model: no live Agent and no recorded selection and no default is polish/no-model', async () => {
+	const host = createHost();
+	host.ctx.agentDefaultModel.currentSelection = () => undefined;
+	const envelope = await translate(host, { sessionId: 'session-1', text: 'x' });
+	assert.equal(envelope.error.code, 'polish/no-model');
+	assert.equal(host.llmCalls.length, 0);
+});
+
+test('model: a session registry that throws is treated as no live Agent', async () => {
+	const host = createHost({
+		respond: () => textChunks('{"kind":"prompt","prompt":"P"}'),
+		observation: modelObservation({ provider: 'recorded-provider', model: 'recorded-model' }),
+	});
+	host.ctx.get = (name) => {
+		if (name === 'agents') throw new Error('registry is inactive');
+		return undefined;
+	};
+	await translate(host, { sessionId: 'session-1', text: 'x' });
+	assert.equal(host.llmCalls[0].provider, 'recorded-provider');
+});
+
+test('model: a deployment without an agent registry still translates', async () => {
+	// `createHost` omits `agents` unless a test asks for it, so this is the shape
+	// of every other case too; asserting it again here keeps the intent explicit.
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}') });
+	assert.equal(host.ctx.get('agents'), undefined);
+	await translate(host, { sessionId: 'session-1', text: 'x' });
+	assert.equal(host.llmCalls[0].provider, 'test-provider');
+});
+
+test('model: the Host never writes the selection back', () => {
+	// Reading the Session route must stay a read: no selection event, no save.
+	assert.doesNotMatch(SOURCE, /\bmodel\.select\(/);
+	assert.doesNotMatch(SOURCE, /saveSelection/);
 });
 
 // ── images ────────────────────────────────────────────────────────────────────

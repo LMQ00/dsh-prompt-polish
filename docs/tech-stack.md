@@ -6,7 +6,7 @@
 
 | 项 | 选择 | 理由 |
 | --- | --- | --- |
-| 宿主 | DSH `0.2.1-rc.2` | 功能以 DSH 插件形态交付，只能用宿主提供的扩展点 |
+| 宿主 | DSH `0.2.2-rc.1` | 功能以 DSH 插件形态交付，只能用宿主提供的扩展点 |
 | 语言 | 普通 ESM JavaScript，无构建步骤 | 与官方插件模板一致；Client 半边由 DSH 的 client module loader 直接加载，引入编译步骤只会增加故障面 |
 | 包形态 | 一个可安装 bundle，源码放仓库根目录（规则 D6） | 见 [architecture.md](architecture.md) 的目录结构 |
 | 依赖 | **零**：`package.json` 没有 `dependencies`；不声明对 DSH 内置包（`@deepseek-ai/dsh-*`）的依赖 | 这些包从 DSH 安装处解析；bundle 只声明自己的元数据与入口 |
@@ -19,8 +19,9 @@
 | --- | --- | --- |
 | 注册斜杠命令 | `ctx.commands.register({ name, description, input, handler })` | `@deepseek-ai/dsh-commands` |
 | 直接调模型（不进会话） | `ctx.llm.stream(options)` | `@deepseek-ai/dsh-llm` |
-| 取当前默认模型 | `ctx.agentDefaultModel.currentSelection()` | `@deepseek-ai/dsh-agent-default-model` |
-| 只读会话上下文 | `ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'none' })` | `@deepseek-ai/dsh-session-query` |
+| 取会话当前模型（主来源） | `ctx.get('agents').get(sessionId).model.current()`（软取，不进 `inject`） | `@deepseek-ai/dsh-agent` |
+| 取部署默认模型（兜底） | `ctx.agentDefaultModel.currentSelection()` | `@deepseek-ai/dsh-agent-default-model` |
+| 只读会话上下文 + 会话记录的模型 | `ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'all' })` | `@deepseek-ai/dsh-session-query` + `@deepseek-ai/dsh-agent` 的 `modelSelection` 投影 |
 | 注册自有 HTTP 路由 | `ctx.webServer.register({ kind, path, handler })` | `@deepseek-ai/dsh-host-webserver` |
 | 路由认证判定 | `ctx.connection.requestRejection({ headers })` | `@deepseek-ai/dsh-client-connection` |
 | 写入输入框 | `InputActions.setDraft(text)` | `@deepseek-ai/dsh-client-ui-conversation` |

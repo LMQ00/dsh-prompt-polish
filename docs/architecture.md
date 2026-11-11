@@ -1,6 +1,6 @@
 # 架构
 
-> 状态：**已实现**。所有「已核实」条目来自读 DSH `0.2.1-rc.2` 的契约与打包产物，不是推测。
+> 状态：**已实现**。所有「已核实」条目来自读 DSH `0.2.2-rc.1` 的契约与打包产物，不是推测。
 
 ## 一句话
 
@@ -29,10 +29,10 @@
 
 ### Host（`index.js`）
 
-- `inject = ['commands', 'llm', 'agentDefaultModel', 'connection', 'webServer', 'sessionQuery']`。`webServer` 是自有路由的宿主；`sessionQuery` 用来**只读**取会话最近的对话作为消歧上下文。
+- `inject = ['commands', 'llm', 'agentDefaultModel', 'connection', 'webServer', 'sessionQuery', 'attachments']`。`webServer` 是自有路由的宿主；`sessionQuery` 用来**只读**取会话最近的对话（消歧上下文）与它记录的模型；`agentDefaultModel` 只做无记录时的兜底；`attachments` 是图片准入。
 - 注册 `/polish` 命令，声明 `input.hint`，`recordInput: false`，handler 只返回 `{kind:'success'}`（**不返回任何文本**）——命令仅用于让 `/polish` 在 `/` 菜单里可见，并给 Client 一个可靠的触发信号。
 - 提供转写：读上下文（失败即降级为空）→ 组装提示词 → `ctx.llm` 调用 → 解析模型返回（追问 / 出稿）→ 经 HTTP 回给调用方。
-- 模型来源：`ctx.agentDefaultModel.currentSelection()`（v1 无 Config，见 [api.md](api.md)）。
+- 模型来源：**会话自己的模型**，不是部署默认。解析顺序 `liveSelection` → `sessionTail` 读到的 `modelSelection` 投影 → `ctx.agentDefaultModel.currentSelection()`（见 [api.md](api.md) §模型解析）。`agents` 用 `ctx.get('agents')` 取而不进 `inject`，是为了让没挂 agent registry 的部署仍能加载本插件。
 - **不注入** `agentLoop`、不追加任何会话事件、不调用任何 fs 写接口（产品边界，见 [decisions.md](decisions.md)）。
 
 ### Client（`client.js`）
@@ -73,10 +73,13 @@ Client 浮层/按钮
   └─ 取粗糙文本（草稿，或从含 /polish 的最近一行里 stripCommand）
   └─ 取输入框里的图片：attachmentIds → resolveDraftAttachments → File → base64
       └─ 桥 → Host: POST /polish/translate { sessionId, text, transcript, feedback, images? }
-          └─ 只读上下文：ctx.sessionQuery.observeSession(sessionId) → 尾部 8 条 user/assistant 文本
-              └─ 有图片时先探模型能力：ctx.llm.resolveModelInfo() 声明了 inputModalities 且不含 image → polish/no-vision
+          └─ 一次只读观察：ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'all' })
+              ├─ 尾部 8 条 user/assistant 文本（消歧上下文）
+              └─ projections.values.modelSelection 的 next ?? lastUsed（会话记录的模型）
+          └─ 解析模型：live Agent 的 model.current() → 上面读到的记录 → ctx.agentDefaultModel 兜底
+              └─ 有图片时先探这条路由的能力：ctx.llm.resolveModelInfo() 声明了 inputModalities 且不含 image → polish/no-vision
                   └─ 图片准入：ctx.attachments.admitPromptContent(images) → ImageAttachmentRef[]
-                      └─ 组装提示词（文本在前、图片在后）→ ctx.llm（不带 sessionId、不带 purpose）
+                      └─ 组装提示词（文本在前、图片在后）→ ctx.llm（同一 provider/model；不带 reasoningEffort、sessionId、purpose）
                           ├─ 模型要澄清 → { kind:'questions', questions[] } → 浮层渲染选项
                           │     └─ 用户回答 → transcript 追加一轮 → 桥再调一次（≤3 轮，图片每轮都重发）
                           └─ 模型给稿 → { kind:'prompt', prompt, assumptions[] }

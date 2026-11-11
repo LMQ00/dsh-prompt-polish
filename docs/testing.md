@@ -1,6 +1,6 @@
 # 测试
 
-> 状态：**自动化测试已实现并全绿**（89 项）。盲读测试仍未执行。
+> 状态：**自动化测试已实现并全绿**（102 项）。盲读测试仍未执行。
 
 ## 框架与运行
 
@@ -9,7 +9,7 @@
 | 框架 | Node 内置 `node:test` + `node:assert/strict` |
 | 运行 | `npm test`（即 `node --test`，自动发现 `test/*.test.js`） |
 | 依赖 | **零**。项目无依赖、无构建，引入 jest/vitest 会为一个 bundle 包增加安装面与锁文件，不值得 |
-| 文件 | `test/host.test.js`（Host 半边，33 项）、`test/client.test.js`（Client 半边，26 项） |
+| 文件 | `test/host.test.js`（Host 半边，65 项）、`test/client.test.js`（Client 半边，37 项），合计 102 项 |
 
 ## 测试缝：Client 怎么被测试
 
@@ -73,7 +73,7 @@ Host（经真实 HTTP handler 断言 `error.code`）：
 | 触发 | code |
 | --- | --- |
 | 空文本 | `polish/empty-input` |
-| 无默认模型 | `polish/no-model` |
+| 三个来源都无模型 | `polish/no-model` |
 | 输出无 JSON 对象 / JSON 不可解析 / questions 为空 / prompt 为空 / 结构不认识 | `polish/bad-output` |
 | 无 finish 标记 / finish 为 `error`·`aborted`·`max-tokens`·未知 | `polish/llm-error` |
 | 抛 `TimeoutError` | `polish/timeout` |
@@ -94,8 +94,26 @@ Client：HTTP 非 2xx → `polish/transport-error`（带状态码）；业务失
 
 - **HTTP 契约**：401/403 拒绝（且不调模型）、非 POST 405、超限 413、非 JSON 400、空 body 等价空 payload、成功时 content-type 正确。
 - **提示词组装**：粗糙文本、四硬清单四项、语言约束、Q/A 渲染、未回答渲染、问满轮次的指令。
-- **上下文读取**：只取 user/assistant 的 text 块（忽略 image 与 tool 事件）、观察租约被释放、尾部 8 条、超长从头截断、读取失败降级为无上下文、无 `sessionId` 时不发起读取、**模型调用不带 `sessionId`/`purpose`**。
+- **上下文读取**：只取 user/assistant 的 text 块（忽略 image 与 tool 事件）、观察租约被释放、尾部 8 条、超长从头截断、读取失败降级为无上下文、无 `sessionId` 时不发起读取、`projectionMode` 为 `'all'`（一次读取同时供上下文与模型选择）、**模型调用不带 `sessionId`/`purpose`**。
 - **边界**：假 ctx 只提供被注入的七个 Service + `effect`，完整请求仍成功（触及 `agentLoop`/fs 就会失败）；源码不得出现 fs 写接口。
+
+### 模型解析（会话自己的模型）
+
+| 用例 | 断言 |
+| --- | --- |
+| live Agent 优先 | 会话 Agent 的路由就是 `ctx.llm.stream` 的 provider/model，与部署默认无关 |
+| 判定与派发同源 | 默认路由是文本模型、会话路由是视觉模型时**不报** `no-vision`，且能力探测只查会话那条路由 |
+| 按名拒绝 | 会话路由不支持图片时，`no-vision` 的文案里是**会话**模型名，且不调模型、不准入 |
+| 冷会话兜底 | 没有 live Agent 时用会话记录里的 `modelSelection` |
+| 预置选择优先 | 记录的 `next` 与 `lastUsed` 不同时用 `next`（GUI 选择器显示的值） |
+| 优先级 | live Agent 覆盖记录值 |
+| 空会话 | 既无 live Agent 也无记录 → 部署默认 |
+| effort 不外泄 | 会话记录带 `reasoningEffort: 'max'` 时，`ctx.llm.stream` 仍不带该字段（路由取会话、effort 不取） |
+| 坏记录降级 | `provider` 为空字符串时视为无效并落到下一个来源 |
+| 全空 | 三个来源都没有 → `polish/no-model`，不调模型 |
+| 软取失败 | `ctx.get('agents')` 抛错等同于没有 live Agent，仍能转写 |
+| 无 registry | 部署没有 `agents` 服务仍能转写 |
+| 只读 | 源码里不出现 `model.select(` 与 `saveSelection` |
 
 ### 图片通路
 
@@ -142,6 +160,10 @@ Client 侧（12 项）：
 
 Host 侧另用真实模型 API 验过：发一张 8×8 纯红 PNG，模型在出稿里引用了该附件对象；落盘对象的 sha256 与源图完全一致。
 
+**模型路由的真实 GUI 复现与验证**（`tmp/gui-3103.mjs` + `tmp/mock-llm.mjs`）：profile 里把**部署默认**钉成文本模型 `probe-text-only`，另配一个视觉模型 `probe-vision`，再起一个会记录 `model` 与「消息里有没有图」的假 OpenAI 端点。脚本用 CDP 打开 GUI，通过**真实的模型选择器**（两级菜单：先点「模型」cell，再点 `menuitemradio`）把会话切到 `probe-vision`，然后粘图、输入文本、点触发按钮。断言链：请求体带 1 张图且带 `sessionId` → 假端点只收到 `model=probe-vision` 且 `hasImage=true` → 浮层无 `no-vision`。
+
+同一脚本对旧代码是可复现的失败用例：默认被 home patch 钉住时，旧实现会在浮层报「当前模型（probe-text-only）不支持图片输入」，假端点一个请求都收不到（改动前实测 3 项 FAIL）。两个前置条件值得记下来，否则会误判为插件没生效：一是首次访问的「预览版说明」浮层必须点「继续」关掉，否则 composer 处于 `inert`、`focus()` 静默失败；二是粘贴图片后浏览器选区落在附件 rail，插文字前必须显式把 range 放回编辑器。
+
 ## 变异验证（证明测试不是空转）
 
 | 变异 | 结果 |
@@ -157,6 +179,11 @@ Host 侧另用真实模型 API 验过：发一张 8×8 纯红 PNG，模型在出
 | body 额度改回「有图就放开」 | 2 项失败 ✓ |
 | 未知模态改回视为支持 | 1 项失败 ✓ |
 | 畸形图片改回静默丢弃 | 4 项失败 ✓ |
+| 模型解析退回「只看部署默认」 | 8 项失败 ✓ |
+| 把 live Agent 从优先级链里删掉 | 5 项失败 ✓ |
+| 把 `reasoningEffort` 透传给 `llm.stream` | 1 项失败 ✓ |
+| `usableSelection` 不再校验空字符串 | 1 项失败 ✓ |
+| 记录值只用 `lastUsed`、忽略 `next` | 1 项失败 ✓ |
 
 ## 未覆盖 / 已知缺口
 
