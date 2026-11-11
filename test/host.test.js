@@ -716,6 +716,26 @@ test('model: an unusable Agent selection falls through to the next source', asyn
 	assert.equal(host.llmCalls[0].provider, 'recorded-provider');
 });
 
+test('model: an unreadable projection keeps the context that was already read', async () => {
+	// The two reads share one observation, so the projection read must fail on its
+	// own: a durable projection an older build wrote is not worth throwing away a
+	// context that was read successfully.
+	const observation = {
+		events: [{ type: 'user/message', data: { content: [{ type: 'text', text: '上文' }] } }],
+		[Symbol.dispose]() {},
+	};
+	Object.defineProperty(observation, 'projections', {
+		get() {
+			throw new Error('projection registry is broken');
+		},
+	});
+	const host = createHost({ respond: () => textChunks('{"kind":"prompt","prompt":"P"}'), observation });
+	const envelope = await translate(host, { sessionId: 'session-1', text: 'x' });
+	assert.equal(envelope.ok, true);
+	assert.match(userText(host), /用户：上文/, 'the context read must survive a broken projection read');
+	assert.equal(host.llmCalls[0].provider, 'test-provider');
+});
+
 test('model: no live Agent and no recorded selection and no default is polish/no-model', async () => {
 	const host = createHost();
 	host.ctx.agentDefaultModel.currentSelection = () => undefined;

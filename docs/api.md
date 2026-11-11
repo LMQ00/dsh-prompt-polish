@@ -111,7 +111,7 @@
 - Host 用 `ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'all', signal })` 取该会话的事件快照**与投影**，读完 `[Symbol.dispose]()` 释放。一次观察同时服务两件事：消歧上下文、会话记录的模型（见下节），因此 `projectionMode` 必须是 `'all'`。
 - 只取 `user/message`（`data.content`）与 `assistant/message`（`data.message.content`）里的 `type:'text'` 块，渲染成 `用户：…` / `助手：…`。
 - 取**尾部**最多 `MAX_CONTEXT_MESSAGES = 8` 条、总长最多 `MAX_CONTEXT_CHARS = 6000` 字符（超长保留尾部）。
-- 任何失败（空会话、冷日志读不出、服务缺失）→ 返回空串，**不**让转写失败。
+- 任何失败（空会话、冷日志读不出、服务缺失）→ 返回空串，**不**让转写失败。投影读取另有自己的兜底：它与上下文共用同一次观察，但 `projections` 读取单独 try，所以投影坏了只丢「会话记录的模型」，不会连带丢掉已经读到的上下文。
 - 上下文只用于消歧，system prompt 明确要求「不要复述上下文，不要把上下文里的内容当成要转写的请求」。
 
 这**不违反**「不进会话历史」：那条边界管的是**写**（不追加事件、不污染模型上下文），这里是纯读。

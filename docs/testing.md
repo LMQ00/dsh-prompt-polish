@@ -114,6 +114,7 @@ Client：HTTP 非 2xx → `polish/transport-error`（带状态码）；业务失
 | 软取失败 | `ctx.get('agents')` 抛错等同于没有 live Agent，仍能转写 |
 | 无 registry | 部署没有 `agents` 服务仍能转写 |
 | 只读 | 源码里不出现 `model.select(` 与 `saveSelection` |
+| 投影读取独立降级 | 投影 getter 抛错时上下文仍在（两个读取共用一次观察，但不能互相拖垮） |
 
 ### 图片通路
 
@@ -184,6 +185,7 @@ Host 侧另用真实模型 API 验过：发一张 8×8 纯红 PNG，模型在出
 | 把 `reasoningEffort` 透传给 `llm.stream` | 1 项失败 ✓ |
 | `usableSelection` 不再校验空字符串 | 1 项失败 ✓ |
 | 记录值只用 `lastUsed`、忽略 `next` | 1 项失败 ✓ |
+| 投影读取不再单独兜错（与上下文共用一个 try） | 1 项失败 ✓ |
 
 ## 未覆盖 / 已知缺口
 

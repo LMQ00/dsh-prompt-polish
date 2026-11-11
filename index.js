@@ -353,11 +353,18 @@ async function sessionTail(ctx, sessionId, signal) {
 			if (line !== undefined) lines.push(line);
 		}
 		const tail = lines.slice(-MAX_CONTEXT_MESSAGES).join('\n');
-		const projection = observation?.projections?.values?.modelSelection;
-		return {
-			context: tail === '' ? '' : tail.length > MAX_CONTEXT_CHARS ? `…${tail.slice(tail.length - MAX_CONTEXT_CHARS)}` : tail,
-			selection: usableSelection(projection?.next) ?? usableSelection(projection?.lastUsed),
-		};
+		const context = tail === '' ? '' : tail.length > MAX_CONTEXT_CHARS ? `…${tail.slice(tail.length - MAX_CONTEXT_CHARS)}` : tail;
+		// The projection read is the only part that depends on projection state, so
+		// it fails on its own: a broken projection must not throw away a context
+		// that was already read successfully.
+		let selection;
+		try {
+			const projection = observation?.projections?.values?.modelSelection;
+			selection = usableSelection(projection?.next) ?? usableSelection(projection?.lastUsed);
+		} catch {
+			selection = undefined;
+		}
+		return { context, selection };
 	} catch {
 		return { context: '', selection: undefined };
 	} finally {
