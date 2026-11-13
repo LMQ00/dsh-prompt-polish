@@ -1,0 +1,8 @@
+{
+  "docsDir": "docs",
+  "entryFiles": ["README.md"],
+  "indexes": [
+    { "doc": "docs/007-architecture.md", "heading": "模块", "roots": ["."], "match": "^[^/]+\\.js$" },
+    { "doc": "docs/007-architecture.md", "heading": "测试", "roots": ["test"], "match": "\\.test\\.js$" }
+  ]
+}

@@ -1,58 +1,64 @@
 # 决策记录
 
-> 每条记录「决定了什么」与「否决了什么」。改设计前先读这里，避免重走已否决的路。
+这份文件记「决定了什么」与「否决了什么」。它与 [001 领域模型](001-domain.md) 到 [008 手册](008-manual.md) 分工不同：那几份写现在是什么、怎么用，这里写为什么不是另一个样子。改设计前先读这里，别重走已否决的路。
 
 ## 产品定位
 
-**目标**：把用户粗糙的一句话/一段话转写成规范提示词，让**无上下文的模型**也能准确理解意图 —— 用户原话「其实最重要的是把事情说清楚」「大概我想要的就是让我的话能对齐大模型吧」。
+**目标**：把用户粗糙的一句话或一段话转写成规范提示词，让**无上下文的模型**也能准确理解意图。用户原话「其实最重要的是把事情说清楚」「大概我想要的就是让我的话能对齐大模型吧」。
 
-由此推出：「规范」不等于套模板，也不等于适配某个特定模型。验收靠盲读测试（见 [testing.md](testing.md)）。
+由此推出：「规范」不等于套模板，也不等于适配某个特定模型。验收靠盲读测试：3 类粗糙输入转写后，把成品贴进一个没有任何上下文的新会话，对方能直接开工才算通过。
 
 ## 不可协商的产品边界
 
-用户明确勾选，**不进 AGENTS.md**（AGENTS.md 只放开发规范），改动需重新确认：
+用户明确勾选。每条都对应 [000 原则](000-philosophy.md) 里的一条，改它们需要重新确认。
 
-| 边界 | 含义 |
-| --- | --- |
-| 绝不自动发送 | 「采用」只调 `setDraft`；代码里不得出现提交/发送调用 |
-| 插件自己不写文件 | 插件运行期不注入、不调用任何 fs 写接口。**图片例外**：图片必须经 `ctx.attachments.admitPromptContent()` 准入，该服务会把规范化后的字节落盘到部署的附件存储；这是「发消息」本身就要付出的代价，不是插件新开的写入通道 |
-| 不进会话历史 | 转写只走 `ctx.llm`，不注入 `agentLoop`、不追加会话事件，不污染模型上下文 |
-| **可以读会话上下文** | 用户在第 2 轮开发追加：「要能读上下文」。Host 只读 `ctx.sessionQuery.observeSession()` 取最近消息用于消歧；边界管的是**写**，读不受限 |
-| 不做模板管理 | 不做多模板 / 模板库 / 模板编辑器 |
-| 不做批量 | 只处理一条提示词 |
-| 不加其他入口 | 除 `/polish` 与模型选择器左侧那个按钮外，不做快捷键、右键菜单等 |
+| 边界 | 含义 | 对应原则 |
+| --- | --- | --- |
+| 绝不自动发送 | 「采用」只调 `setDraft`；代码里不出现提交调用 | P1 |
+| 浮层是唯一输出面 | 结果不进对话流、不进会话历史 | P2 |
+| 用户文本不进会话日志 | 转写只走插件自己的 HTTP 路由，不注入 `agentLoop`、不追加会话事件 | P3 |
+| 可以读会话上下文 | 用户在第 2 轮开发追加「要能读上下文」。边界管**写**，读不受限 | P4 |
+| 插件自己不写文件 | 唯一的落盘是图片经 `ctx.attachments.admitPromptContent` 进附件存储 | P5 |
+| 不做模板管理 | 不做多模板、模板库、模板编辑器 | — |
+| 不做批量 | 只处理一条提示词 | — |
+| 不加其他入口 | 除 `/polish` 与工具条按钮外，不做快捷键、右键菜单 | — |
 
 ## 关键决策
 
 | 决策 | 选择 | 理由 |
 | --- | --- | --- |
 | 交付形态 | DSH 插件 bundle | 只有插件能同时拿到命令注册与输入框写入能力 |
-| 转写执行者 | 插件独立调 `ctx.llm` | 用户选定；且不污染会话历史 |
-| 结果展示面 | 输入框正上方浮层（`conversation.input.dock`） | 用户要求「输入框上方浮层」；源码 `client.js:16309` 核实该 slot 渲染在输入框卡片之前 |
-| 触发按钮位置 | 模型选择器左侧（`conversation.input.right`） | 用户在截图上圈定；源码 `client.js:17532` 核实该 slot 渲染在 `conversation.input.model` 之前 |
-| 触发入口 | `/polish` 命令 + 按钮，二者共用一套逻辑 | 用户要求两者都支持 |
+| 转写执行者 | 插件独立调 `ctx.llm` | 不污染会话历史；由当前会话 Agent 回答会在会话里多一轮对话 |
+| 结果展示面 | 输入框正上方浮层（`conversation.input.dock`） | 用户要求「输入框上方浮层」；该 slot 渲染在输入框卡片之前 |
+| 触发按钮位置 | 模型选择器左侧（`conversation.input.right`） | 用户在截图上圈定；该 slot 渲染在 `conversation.input.model` 之前 |
+| 触发入口 | `/polish` 命令 + 按钮，共用一套逻辑 | 用户要求两者都支持 |
 | 粗糙文本来源 | 有参数用参数，无参数用当前草稿 | 用户选「两者都支持」 |
-| 缺信息处理 | 先追问澄清，浮层内多轮，上限 3 轮 | 用户选定；上限避免无限问答 |
+| 缺信息处理 | 先追问澄清，浮层内多轮，上限 3 轮 | 上限避免无限问答 |
 | 追问形式 | 选项按钮（可多选）+ 可自由填 | 回答成本最低且不限制表达 |
-| 浮层内容 | 只读，不能直接改 | 用户选定；要改就带反馈重试，或采用后回输入框改 |
-| 重试语义 | 只带反馈重试 | 用户选定；「不满意」需填一句理由，理由进下一轮请求 |
-| 写入方式 | 整段替换 + 聚焦 | 用户选定；符合「我认可了再发送」 |
-| 输出语言 | 跟输入语言，术语保留英文 | 用户选定 |
-| 模型 | 跟随**当前会话的模型**（会话切换即生效），无会话记录时用部署默认兜底；v1 无 Config | 用户选定；既不突兀又能兜底 |
+| 浮层内容 | 只读，不能直接改 | 要改就带反馈重试，或采用后回输入框改 |
+| 重试语义 | 只带反馈重试 | 「不满意」需填一句理由，理由进下一轮请求 |
+| 写入方式 | 整段替换 + 聚焦 | 符合「我认可了再发送」 |
+| 输出语言 | 跟输入语言，术语保留英文 | — |
+| 模型 | 跟随**当前会话的模型**，无记录时用部署默认兜底 | 既不突兀又能兜底；v1 无 Config |
 | 生成历史 | 不保留 | 与「不进会话历史」一致 |
 | 源码位置 | 仓库根目录 | 用户原话「源码放根目录，就是给这个项目用的」 |
 | 临时文件 | 只放 `tmp/` | 用户指定的开发规范 |
-| 图片随行 | 两个入口都带图片，只带图片不带普通文件 | 用户选定；图片是「粗糙提示词」的一部分，普通文件与转写无关 |
-| 模型不看图时的处理 | 明确报 `polish/no-vision` 并保留原文，不静默丢图 | 用户选定：静默丢图会让人以为模型看过图 |
-| 图片传输格式 | Client 读 `File` → base64 进请求体，Host 经 `admitPromptContent` 准入 | 模型适配器只认 `ImageAttachmentRef`，而准入是唯一能拿到它的入口 |
-| 图片采集时机 | 触发那一刻抓 `File` 句柄，之后澄清/重试复用 | 重新采集会读到用户中途改过的输入框，且 `/polish` 提交后原附件已被消费 |
-| 提交后交还图片 | 只在提交**成功**时还原 rail | 上游只在成功时清空 rail 并释放附件；失败时无条件还原会把同一张图登记两次 |
-| 不可读图片 | 整次拒绝（`polish/bad-image`），不静默丢图 | 「用户以为模型看了图、实际只转了文字」正是本功能要消除的失败；先前的静默丢弃经审查判定为缺陷 |
-| body 额度 | `64 KiB + 本次图片实际 base64 字节` | 「有图就放开到 300 MiB」会让一张 96 字节的图换来整档额度，是审查发现的资源放大漏洞 |
-| 未知模型模态 | 视为**不支持图片** | 上游适配器就是按 `inputModalities` gate（缺该字段即抛 `UNSUPPORTED_CONTENT`），放行只会把清晰拒绝变成下游 `llm-error` |
-| 转写不带 `reasoningEffort` | 只取会话的 provider/model，effort 交适配器默认 | 转写是一次短改写，不是会话里的一步：借用户的 effort 会白等推理，而且任何未声明 `reasoning` 的模型都会被 `dsh-llm` 以 `UNSUPPORTED_REASONING_EFFORT` 直接拒绝 |
-| 模型解析来源 | live Agent → 会话 `modelSelection` 投影 → 部署默认 | 只有这样才能让「判定能不能看图」和「真正派发」指向同一个模型；用户环境里默认模型是 `deepseek-flash`（文本）、会话选的是视觉模型，旧实现因此误报 `polish/no-vision` |
-| `agents` 不进 `inject` | 用 `ctx.get('agents')` 软取 | 没挂 agent registry 的部署必须仍能加载本插件；取不到就落到投影与默认 |
+| 图片随行 | 两个入口都带图片，只带图片不带普通文件 | 图片是「粗糙提示词」的一部分 |
+| 模型不看图时的处理 | 明确报 `polish/no-vision` 并保留原文，不静默丢图 | 静默丢图会让人以为模型看过图 |
+| 图片传输格式 | Client 读 `File` → base64 进请求体，Host 经 `admitPromptContent` 准入 | 模型适配器只认 `ImageAttachmentRef`，准入是唯一能拿到它的入口 |
+| 图片采集时机 | 触发那一刻抓 `File` 句柄，之后澄清与重试复用 | 重新采集会读到用户中途改过的输入框，且 `/polish` 提交后原附件已被消费 |
+| 提交后交还图片 | 只在提交**成功**时还原轨道 | 上游只在成功时清空轨道并释放附件；失败时还原会把同一张图登记两次 |
+| 不可读图片 | 整次拒绝（`polish/bad-image`） | 「用户以为模型看了图、实际只转了文字」正是本功能要消除的失败 |
+| body 额度 | `64 KiB` + 本次图片实际 base64 字节 | 「有图就放开到 300 MiB」会让一张 96 字节的图换来整档额度，是资源放大漏洞 |
+| 未知模型模态 | 视为**不支持图片** | 上游适配器就是按 `inputModalities` gate，放行只会把清晰拒绝变成下游 `llm-error` |
+| 转写不带 `reasoningEffort` | 只取会话的 provider/model，effort 交适配器默认 | 转写是一次短改写，借用户的 effort 会白等推理；未声明 `reasoning` 的模型会被 `dsh-llm` 以 `UNSUPPORTED_REASONING_EFFORT` 直接拒绝 |
+| 模型解析来源 | live Agent → 会话 `modelSelection` 投影 → 部署默认 | 只有这样才能让「判定能不能看图」和「真正派发」指向同一个模型 |
+| `agents` 不进 `inject` | 用 `ctx.get('agents')` 软取 | 没挂 agent registry 的部署必须仍能加载本插件 |
+| 调用桥 | 插件自有 HTTP 路由 + 普通 `fetch` | 不需要代码生成；走 HTTP，不落会话日志；认证复用 `ctx.connection.requestRejection` |
+| 追问上限改为代码强制 | Client 在 `questions` 分支检查 `rounds >= MAX_ROUNDS` | 原实现只靠提示词请求模型别问，模型不听话就会多出第 4 轮 |
+| 追问预算与记录分离 | 新增 `rounds`；「不满意重试」归零、`transcript` 保留；出错重试两者都保留 | 上限是为了拦模型无限盘问，不是拦用户 |
+| 自动化测试用 `node:test` | `npm test` = `node --test` | 项目零依赖零构建；jest/vitest 会为一个 bundle 包引入安装面与锁文件 |
+| Client 暴露 `__internals` 作为测试缝 | 工厂返回值多一个纯函数集合 | 浏览器模块加载器只交出工厂，状态机与序列化函数没有第二条可达路径 |
 
 ## 被否决的方案
 
@@ -60,43 +66,30 @@
 | --- | --- |
 | 纯提示词模板文件 | 只能复制粘贴，无法自动写进输入框 |
 | DSH skill | 同上：skill 只能让模型输出文本，写不了输入框 |
-| 由当前会话 Agent 回答 | 会在会话里产生一轮对话、污染上下文；用户明确选了插件独立调模型 |
+| 由当前会话 Agent 回答 | 会在会话里产生一轮对话、污染上下文 |
 | 命令结果走 chat 行展示 | 用户要的是输入框上方浮层，不是对话流里的卡片 |
 | 在 AI 回复上加「插入输入框」按钮 | 依赖会话里产生一轮回复，与「不进会话历史」冲突 |
-| 输入框浮层内可编辑 | 用户选定只读；可编辑会让「采用」与「手改」的语义混淆 |
+| 输入框浮层内可编辑 | 可编辑会让「采用」与「手改」的语义混淆 |
 | 固定结构模板（角色/任务/上下文/约束/输出格式…） | 用户否决：「ai来转」，由 AI 判断怎么才算清楚 |
-| 面向特定目标模型调优 | 用户否决：重点是「把事情说清楚」，不是适配某个模型 |
+| 面向特定目标模型调优 | 用户否决：重点是「把事情说清楚」 |
 | 保留生成历史 | 与「不进会话历史」冲突，且增加存储面 |
 | 包目录放 `packages/polish/` | 用户否决：源码放仓库根目录 |
-| 把产品边界写成 AGENTS.md 规则 | 用户裁决：AGENTS.md 只放开发规范规则，产品特性归 docs/ |
+| 把产品边界写成 AGENTS.md 规则 | 用户裁决：AGENTS.md 只放开发规范，产品特性归 docs/ |
 | 图片走 data URL 或临时文件传给模型 | 适配器只读准入后的 `ImageAttachmentRef`；临时文件还会违反「不写文件」 |
 | 把图片存进插件自己的目录再读 | 绕开准入等于自建一套存储与生命周期，且模型侧根本不认 |
 | 让用户手动把图片重新拖进来 | 用户的诉求就是别让他重复劳动 |
-| 调用桥用 `ctx.remote.commands.execute` 执行 `/polish`，拿命令结果回传 | 命令结果会进 `command/done`，等于把规范提示词写进会话日志，违反产品边界；且命令 handler 跑在 Host，拿不到输入框 |
+| 调用桥用 `ctx.remote.commands.execute` 执行 `/polish` 并回传结果 | 命令结果会进 `command/done`，等于把规范提示词写进会话日志；且命令 handler 跑在 Host，拿不到输入框 |
 | 调用桥用 Typert 生成的 `ctx.remote.*` 命名空间 | 需要生成产物与构建步骤；本仓库是普通 JS、无构建 |
-| 继续用 `ctx.agentDefaultModel.currentSelection()` 决定转写模型 | 那是**全局默认**，与会话选择会分叉（configEditor 被 home patch 覆盖时 `saveSelection` 直接失败，默认永远停在启动时的值）；判定与派发必须同源 |
-| 浮层可编辑 | 用户选定只读；重试必须带反馈 |
-| v1 就声明 Config | 声明 Config 要 import schema 库；workspace 包的模块解析路径与 profile 安装包不同，先保证能加载，Config 延后 |
+| 调用桥用 `ctx.connection.rpc.handle` | **实测不可用**：它把路由挂在 connection 服务自己的 ctx 上（`register(this.ctx, …)`），那个 ctx 的 inject 只有 `credentials` + `webRuntime`，不含 `webServer`；任何调用方都撞 `cannot get property "webServer" without inject`，给本插件加 `webServer` 无效，因为 owner 不是本插件 |
+| 调用桥用 `rpc.intercept('/api', …)` | API Gateway 已占 `/api` 的唯一 interceptor，第二次注册直接抛错 |
+| 用 `ctx.agentDefaultModel.currentSelection()` 决定转写模型 | 那是**全局默认**，与会话选择会分叉（configEditor 被 home patch 覆盖时 `saveSelection` 直接失败，默认永远停在启动时的值）；判定与派发必须同源 |
+| v1 就声明 Config | 声明 Config 要 import schema 库；workspace 包的模块解析路径与 profile 安装包不同，先保证能加载 |
 
-## 已实现的决策
+## 已知未决 / 风险
 
-| 决策 | 选择 | 理由 |
-| --- | --- | --- |
-| 调用桥 | 插件自有 HTTP 路由：Host `ctx.webServer.register({kind:'exact', path:'/polish/translate'})`，Client 普通 `fetch` | 不需要代码生成；走 HTTP，不落会话日志；认证复用 `ctx.connection.requestRejection` |
-| Host `inject` | `['commands','llm','agentDefaultModel','connection','webServer','sessionQuery','attachments']` | 路由挂在 `webServer`；`connection` 只用来取认证判定；`sessionQuery` 只读上下文与会话记录的模型；`attachments` 是图片准入；`agents` 软取，见上表 |
-| 为什么不用 `ctx.connection.rpc.handle` | **实测不可用**：`handle` 把路由挂在 connection 服务自己的 ctx 上（`register(this.ctx, …)`），该 ctx 的 inject 只有 `credentials` + `webRuntime`，不含 `webServer`，任何调用方都撞 `cannot get property "webServer" without inject`；给本插件加 `webServer` 无效，因为 owner 不是本插件 | 上游问题，不是配置错误 |
-| 为什么不用 `rpc.intercept('/api', …)` | API Gateway 已占 `/api` 的唯一 interceptor，第二个注册直接抛错 | — |
-| `/polish` 命令的角色 | 只做「可见性 + 触发信号」：`recordInput: false`，handler 返回 `{kind:'success'}` 不带 text | 让命令记录行里既没有粗糙文本也没有规范提示词 |
-| 粗糙文本的来源 | Client 记下含 `/polish` 的最近一行草稿，`command/executed` 时取用 | 命令提交会清空草稿；这样不用把文本写进会话日志 |
-| 在途请求作废 | AbortController + 状态对象身份比较 | 比造请求 id 少一层状态 |
-| v1 无 Config | 常量写死在 `index.js` | 见上 |
-| 追问上限改为**代码强制** | Client 在 `questions` 分支检查 `rounds >= MAX_ROUNDS`，超了报 `polish/round-limit` | 写自动化测试时发现原实现只靠提示词「请求」模型别问，模型不听话就会多出第 4 轮，与用户确认的「上限 3 轮」不符 |
-| 追问**预算**与**记录**分离 | 新增 `rounds`；「不满意重试」归零、`transcript` 保留；出错重试两者都保留 | 用户指出的设计漏洞：第一版用 `transcript.length` 当预算，导致问满 3 轮后对出稿不满意也再没机会要求澄清。上限是为了拦模型无限盘问，不是拦用户 |
-| 自动化测试用 Node 内置 `node:test` | `npm test` = `node --test` | 项目零依赖零构建；jest/vitest 会为一个 bundle 包引入安装面与锁文件 |
-| Client 暴露 `__internals` 作为测试缝 | 工厂返回值多一个纯函数集合 | 浏览器模块加载器只交出工厂，状态机与序列化函数没有第二条可达路径；运行时不读该属性 |
-
-## 已知未决/风险
-
-- `/polish` 会在对话流留下一条命令记录行（DSH 命令机制固有，log-only、模型不可见）。已压到无 `args`、无结果 `text`。若实测仍不可接受，退路是只保留按钮入口。详见 [api.md](api.md)。
-- 改 Host 半边（`index.js`）后**必须重启 dsh**（ESM 模块缓存）。操作步骤与重启前探针见 [runbook.md](runbook.md) §Host 改动必须重启。
-- Config 延后。`[待确认]`：workspace 包能否 bare import `@deepseek-ai/schemastery` 以声明 Config schema。本项目至今**没有任何 bare import**，所以这条假设始终未被验证过——补 Config 时先验证它。
+- **盲读测试仍未执行。** 转写质量的人工验收，自动化测试替代不了。3 类粗糙输入转写后，把成品贴进一个没有任何上下文的新会话，对方能直接开工才算通过；失败条目记录原文与对方反问，用于改提示词。
+- **`/polish` 会在对话流留下一条命令记录行。** DSH 命令机制固有，log-only、模型不可见；已压到无 `args`、无结果 `text`。若实测仍不可接受，退路是只保留按钮入口。
+- **改 Host 半边必须重启 dsh**（ESM 模块缓存）。重装 bundle、关开插件都不换模块。步骤见 [006 部署](006-deployment.md) §升级。
+- **Config 延后。** `[待确认]`：workspace 包能否 bare import `@deepseek-ai/schemastery` 以声明 Config schema。本项目至今没有任何 bare import，这条假设始终未被验证过；补 Config 时先验证它。
+- **图片准入无回收接口。** 宿主当前版本没有附件 GC，重复转写不同图片会累积占用。
+- **浮层的真实渲染、样式、深色主题没有自动化测试。** 项目禁止引入 DOM 模拟或自定义渲染器，只能人工看。

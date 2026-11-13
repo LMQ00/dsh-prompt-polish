@@ -22,7 +22,7 @@ DSH 插件：把粗糙提示词转写成规范提示词，浮层预览确认后�
 | --- | --- | --- |
 | `/polish 帮我写个登录页` | 参数文本 | 不动 |
 | `/polish`（草稿非空） | 当前草稿 | 不动，只在「采用」时被替换 |
-| `/polish`（草稿为空） | 无 | 浮层提示「先写点东西」，不调模型 |
+| `/polish`（草稿为空） | 无 | 浮层打开输入态，在面板里直接写，不调模型 |
 
 转写结果在输入框上方的浮层里预览，点「采用」才写进输入框。模型认为信息不够时最多追问 3 轮，
 追问选项的形状刻意对齐 DSH 内置的提问组件。
@@ -51,19 +51,19 @@ DSH 插件：把粗糙提示词转写成规范提示词，浮层预览确认后�
 开发规范（临时文件位置、验证流程、提交习惯、绝对路径禁令等）见 [`AGENTS.md`](AGENTS.md)
 的 D1–D8，那里是唯一权威。
 
-## 文档索引
+## 文档
 
-| 文档 | 何时读 |
-| --- | --- |
-| [`docs/交接文档.md`](docs/交接文档.md) | 第一次接手，或不确定该读哪份时 |
-| [`docs/tech-stack.md`](docs/tech-stack.md) | 改技术选型、加依赖、考虑换实现方式前 |
-| [`docs/architecture.md`](docs/architecture.md) | 改模块划分、Host/Client 职责、调用桥、写入路径前 |
-| [`docs/data-model.md`](docs/data-model.md) | 改浮层状态机、追问轮次、错误态前 |
-| [`docs/api.md`](docs/api.md) | 改 `/polish` 命令契约、HTTP 契约、输出契约、错误码前 |
-| [`docs/development.md`](docs/development.md) | 搭环境、安装 bundle、判断是否真的生效前 |
-| [`docs/testing.md`](docs/testing.md) | 写测试、跑测试、跑盲读测试前 |
-| [`docs/runbook.md`](docs/runbook.md) | 出问题时：按钮不见、浮层错位、打字打不进、改了不生效 |
-| [`docs/decisions.md`](docs/decisions.md) | 追问「为什么这么设计」「为什么不用 X」前 |
+按顺序读，每份只建立在它前面几份之上。
+
+- [000 原则](docs/000-philosophy.md)
+- [001 领域模型](docs/001-domain.md)
+- [002 规则与权限](docs/002-rules.md)
+- [003 生命周期](docs/003-lifecycle.md)
+- [004 配置与提示词](docs/004-prompts.md)
+- [005 界面](docs/005-interface.md)
+- [006 部署](docs/006-deployment.md)
+- [007 架构](docs/007-architecture.md)
+- [008 手册](docs/008-manual.md)
 
 ## 自测
 

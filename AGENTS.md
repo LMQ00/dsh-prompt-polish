@@ -4,18 +4,19 @@
 
 ## 文档索引
 
-改代码前先读对应文档；文档与代码冲突时以代码为准，并立刻修文档（见 D2）。
+改代码前先读对应文档；文档与代码冲突时以代码为准，并立刻修文档（见 D2）。按编号顺序读，每份只建立在它前面几份之上。
 
 | 文档 | 类型 | 何时读 |
 | --- | --- | --- |
-| [docs/交接文档.md](docs/交接文档.md) | 入口 | 第一次接手，或不确定该读哪份时 |
-| [docs/tech-stack.md](docs/tech-stack.md) | 技术选型 | 改技术选型、加依赖、考虑换实现方式前 |
-| [docs/architecture.md](docs/architecture.md) | 架构 | 改模块划分、Host/Client 职责、调用桥、写入路径前 |
-| [docs/data-model.md](docs/data-model.md) | 数据模型 | 改浮层状态机、追问轮次、错误态前 |
-| [docs/api.md](docs/api.md) | 契约 | 改 `/polish` 命令契约、HTTP 契约、输出契约、错误码前 |
-| [docs/development.md](docs/development.md) | 开发 | 搭环境、安装 bundle、判断是否真的生效前 |
-| [docs/testing.md](docs/testing.md) | 测试 | 写测试、跑测试、跑盲读测试前 |
-| [docs/runbook.md](docs/runbook.md) | 排障 | 出问题时：按钮不见、浮层错位、打字打不进、改了不生效 |
+| [docs/000-philosophy.md](docs/000-philosophy.md) | 原则 | 判断一个功能能不能做，或要否决一个设计前 |
+| [docs/001-domain.md](docs/001-domain.md) | 领域模型 | 确认概念怎么命名、状态与错误码有哪些取值前 |
+| [docs/002-rules.md](docs/002-rules.md) | 规则与权限 | 改认证、准入、额度、上限、只读约束前 |
+| [docs/003-lifecycle.md](docs/003-lifecycle.md) | 生命周期 | 改浮层状态机、迁移、重试、中止前 |
+| [docs/004-prompts.md](docs/004-prompts.md) | 配置与提示词 | 改转写提示词、用户轮拼装、浮层文案前 |
+| [docs/005-interface.md](docs/005-interface.md) | 界面 | 改浮层的显示内容、按钮、样式前 |
+| [docs/006-deployment.md](docs/006-deployment.md) | 部署 | 搭环境、安装 bundle、判断是否真的生效、排障前 |
+| [docs/007-architecture.md](docs/007-architecture.md) | 架构 | 改模块划分、Host/Client 职责、调用桥、写入路径、测试前 |
+| [docs/008-manual.md](docs/008-manual.md) | 手册 | 加错误码、加图片类型、加浮层状态、换模型来源前 |
 | [docs/decisions.md](docs/decisions.md) | 决策 | 追问「为什么这么设计」「为什么不用 X」前 |
 
 ## 规则
